@@ -1,0 +1,93 @@
+# Synthetic Trader Config
+# API credentials loaded from .env or environment variables
+
+deriv:
+  # WebSocket endpoint (public for market data, authenticated for trading)
+  endpoint: "wss://ws.derivws.com/websockets/v3"
+  # App ID from https://api.deriv.com/dashboard
+  # 1089 = public testing app_id (market data only, no trading)
+  app_id: 1089
+  # Set to false for real account (DANGER: requires explicit approval)
+  is_demo: true
+
+# Instruments to trade
+instruments:
+  # Range Break = ONLY synthetic where technical analysis works
+  range_break:
+    - symbol: "RDBR100"
+      display_name: "Range Break 100"
+      enabled: true
+  # Volatility indices for statistical analysis
+  volatility:
+    - symbol: "R_10"
+      display_name: "Volatility 10%"
+      enabled: false
+    - symbol: "R_50"
+      display_name: "Volatility 50%"
+      enabled: false
+
+# Risk management — NON-NEGOTIABLE
+risk:
+  # Max risk per trade as fraction of capital
+  max_risk_per_trade: 0.015
+  # Max daily drawdown as fraction of capital
+  max_daily_drawdown: 0.05
+  # Max trades per day
+  max_trades_per_day: 8
+  # Circuit breaker: consecutive losses before auto-halt
+  circuit_breaker_losses: 5
+  # Kelly fraction (quarter-Kelly = 0.25)
+  kelly_fraction: 0.25
+  # Initial capital for paper trading (USD)
+  initial_capital: 10000.0
+
+# Strategy configuration
+strategy:
+  range_break:
+    # Min ticks to confirm channel
+    min_channel_ticks: 50
+    # Min channel width as fraction of mid price
+    min_channel_width: 0.005
+    # Buffer above/below channel for entry
+    entry_buffer: 0.1
+    # TP = entry +/- this fraction of channel width
+    tp_fraction: 0.5
+    # SL buffer beyond opposite channel edge
+    sl_buffer: 0.2
+    # Max position duration (seconds)
+    max_duration: 1800
+
+# Backtest configuration
+backtest:
+  # Granularity in seconds for candle data
+  granularity: 60
+  # Lookback period for historical data (days)
+  lookback_days: 180
+  # Walk-forward: train/test split ratio
+  train_ratio: 0.67
+  # Monte Carlo simulations
+  mc_simulations: 10000
+  # Gate criteria
+  gates:
+    min_sharpe: 1.2
+    max_drawdown: 0.12
+    min_win_rate: 0.52
+    min_expectancy: 0.15
+
+# Paper trading configuration
+paper:
+  # Min duration in days
+  min_days: 15
+  # Min number of trades
+  min_trades: 30
+  # Gate criteria
+  gates:
+    profitable: true
+    max_daily_drawdown: 0.04
+    min_win_rate: 0.50
+
+# Storage
+storage:
+  ticks_dir: "data/ticks"
+  candles_dir: "data/candles"
+  reports_dir: "reports"
