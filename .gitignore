@@ -17,3 +17,10 @@ reports/paper/
 venv/
 .mypy_cache/
 .pytest_cache/
+
+# Dashboard (Next.js) — formerly broken submodule, now part of repo
+dashboard/node_modules/
+dashboard/.next/
+dashboard/.git/
+dashboard/out/
+dashboard/build/
