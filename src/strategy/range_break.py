@@ -18,13 +18,18 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RangeBreakConfig:
-    """Configuration for Range Break strategy."""
-    min_channel_ticks: int = 50       # Min candles to confirm channel
-    min_channel_width: float = 0.005  # Min width as fraction of mid price (0.5%)
-    entry_buffer: float = 0.1         # Buffer above/below channel for entry (fraction of width)
-    tp_fraction: float = 0.5          # TP = entry +/- this fraction of channel width
-    sl_buffer: float = 0.2            # SL buffer beyond opposite channel edge
-    max_duration: int = 1800          # Max position duration in seconds
+    """Configuration for Range Break strategy.
+
+    Tuned for RB100 (Range Break 100 Index) where channel widths are
+    typically 0.03%-0.10% of mid price. See skill
+    'algorithmic-trading-synthetic-indices' for details.
+    """
+    min_channel_ticks: int = 20       # Min candles to confirm channel (20 = more signals)
+    min_channel_width: float = 0.0001 # Min width as fraction of mid (0.01% — RB100 channels are tight)
+    entry_buffer: float = 0.0         # No buffer for RB100 (breakout itself is the signal)
+    tp_fraction: float = 1.0          # TP = full channel width (ensures b >= 1, positive Kelly)
+    sl_buffer: float = 0.0            # SL at opposite channel edge (no extra buffer)
+    max_duration: int = 900           # Max position duration (15 min — tighter exits)
 
 
 class RangeBreakStrategy(Strategy):
@@ -46,7 +51,7 @@ class RangeBreakStrategy(Strategy):
     - Time: Max 30 minutes
     """
 
-    def __init__(self, symbol: str = "RDBR100", config: RangeBreakConfig | None = None):
+    def __init__(self, symbol: str = "RB100", config: RangeBreakConfig | None = None):
         super().__init__("RangeBreak", symbol)
         self.config = config or RangeBreakConfig()
 

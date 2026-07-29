@@ -14,9 +14,12 @@ deriv:
 instruments:
   # Range Break = ONLY synthetic where technical analysis works
   range_break:
-    - symbol: "RDBR100"
+    - symbol: "RB100"
       display_name: "Range Break 100"
       enabled: true
+    - symbol: "RB200"
+      display_name: "Range Break 200"
+      enabled: false
   # Volatility indices for statistical analysis
   volatility:
     - symbol: "R_10"
@@ -44,18 +47,18 @@ risk:
 # Strategy configuration
 strategy:
   range_break:
-    # Min ticks to confirm channel
-    min_channel_ticks: 50
-    # Min channel width as fraction of mid price
-    min_channel_width: 0.005
-    # Buffer above/below channel for entry
-    entry_buffer: 0.1
-    # TP = entry +/- this fraction of channel width
-    tp_fraction: 0.5
-    # SL buffer beyond opposite channel edge
-    sl_buffer: 0.2
-    # Max position duration (seconds)
-    max_duration: 1800
+    # Min ticks to confirm channel (20 = more signals on tight RB100 channels)
+    min_channel_ticks: 20
+    # Min channel width as fraction of mid price (0.01% — RB100 channels are 0.03-0.10%)
+    min_channel_width: 0.0001
+    # Buffer above/below channel for entry (0.0 — breakout itself is the signal)
+    entry_buffer: 0.0
+    # TP = entry +/- this fraction of channel width (1.0 = full width, ensures positive Kelly)
+    tp_fraction: 1.0
+    # SL buffer beyond opposite channel edge (0.0 = SL at channel edge)
+    sl_buffer: 0.0
+    # Max position duration (seconds) — 15 min tighter exits
+    max_duration: 900
 
 # Backtest configuration
 backtest:

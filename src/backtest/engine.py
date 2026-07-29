@@ -232,6 +232,18 @@ class BacktestEngine:
         entry_time = int(entry_candle["epoch"])
         entry_price = signal.entry_price
 
+        # R-multiple denominator: the dollar risk per unit at entry
+        # = size * (distance from entry to SL / entry_price)
+        sl_distance = abs(signal.entry_price - signal.stop_loss)
+        risk_amount = size * (sl_distance / signal.entry_price) if signal.entry_price > 0 else 0
+        # Guard against zero risk (shouldn't happen with valid channels)
+        if risk_amount <= 0:
+            risk_amount = size
+
+        def r_multiple(pnl_usd: float) -> float:
+            """Convert dollar P&L to R-multiple of the trade's risk."""
+            return pnl_usd / risk_amount if risk_amount > 0 else 0.0
+
         # Look ahead for exit
         max_candles = signal.duration_seconds // 60  # Assuming 1-min candles
 
@@ -248,14 +260,14 @@ class BacktestEngine:
                     pnl = -size * (abs(signal.entry_price - signal.stop_loss) / signal.entry_price)
                     return Trade(entry_time, epoch, "LONG", entry_price,
                                  signal.stop_loss, signal.stop_loss, signal.take_profit,
-                                 pnl, pnl / size, epoch - entry_time, False, "SL")
+                                 pnl, r_multiple(pnl), epoch - entry_time, False, "SL")
 
                 # Check TP
                 if high >= signal.take_profit:
                     pnl = size * (abs(signal.take_profit - signal.entry_price) / signal.entry_price)
                     return Trade(entry_time, epoch, "LONG", entry_price,
                                  signal.take_profit, signal.stop_loss, signal.take_profit,
-                                 pnl, pnl / size, epoch - entry_time, True, "TP")
+                                 pnl, r_multiple(pnl), epoch - entry_time, True, "TP")
 
             elif signal.type == SignalType.SHORT:
                 # Check SL first
@@ -263,21 +275,21 @@ class BacktestEngine:
                     pnl = -size * (abs(signal.stop_loss - signal.entry_price) / signal.entry_price)
                     return Trade(entry_time, epoch, "SHORT", entry_price,
                                  signal.stop_loss, signal.stop_loss, signal.take_profit,
-                                 pnl, pnl / size, epoch - entry_time, False, "SL")
+                                 pnl, r_multiple(pnl), epoch - entry_time, False, "SL")
 
                 # Check TP
                 if low <= signal.take_profit:
                     pnl = size * (abs(signal.entry_price - signal.take_profit) / signal.entry_price)
                     return Trade(entry_time, epoch, "SHORT", entry_price,
                                  signal.take_profit, signal.stop_loss, signal.take_profit,
-                                 pnl, pnl / size, epoch - entry_time, True, "TP")
+                                 pnl, r_multiple(pnl), epoch - entry_time, True, "TP")
 
             # Time exit
             if epoch - entry_time >= signal.duration_seconds:
                 pnl = size * ((close - entry_price) / entry_price) * (1 if signal.type == SignalType.LONG else -1)
                 return Trade(entry_time, epoch, signal.type.value, entry_price,
                              close, signal.stop_loss, signal.take_profit,
-                             pnl, pnl / size, epoch - entry_time, pnl > 0, "TIME")
+                             pnl, r_multiple(pnl), epoch - entry_time, pnl > 0, "TIME")
 
         return None
 
