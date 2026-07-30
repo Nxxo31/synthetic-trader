@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Synthetic Trader — Live Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <style>
+        :root {
+            --bg: #0a0e17;
+            --card-bg: #131826;
+            --card-border: #1e2438;
+            --text: #e0e6f0;
+            --text-dim: #6b7593;
+            --green: #00d68f;
+            --green-bg: rgba(0, 214, 143, 0.1);
+            --red: #ff4d6d;
+            --red-bg: rgba(255, 77, 109, 0.1);
+            --yellow: #ffb547;
+            --blue: #4d8dff;
+            --purple: #a855f7;
+            --radius: 12px;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            padding: 24px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        h1 { font-size: 1.6rem; }
+        h2 { font-size: 1.1rem; color: var(--text-dim); font-weight: 400; }
+        .header { margin-bottom: 24px; display: flex; justify-content: space-between; align-items: flex-start; }
+        .connection-status {
+            display: flex; align-items: center; gap: 8px;
+            font-size: 0.8rem; color: var(--text-dim);
+        }
+        .dot { width: 8px; height: 8px; border-radius: 50%; }
+        .dot-connected { background: var(--green); box-shadow: 0 0 6px var(--green); }
+        .dot-disconnected { background: var(--red); }
+        .dot-connecting { background: var(--yellow); animation: pulse 1s infinite; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+        .kpi-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+            gap: 16px; margin-bottom: 24px;
+        }
+        .kpi-card {
+            background: var(--card-bg); border: 1px solid var(--card-border);
+            border-radius: var(--radius); padding: 20px;
+        }
+        .kpi-label { color: var(--text-dim); font-size: 0.75rem; text-transform: uppercase; margin-bottom: 8px; }
+        .kpi-value { font-size: 1.5rem; font-weight: 700; }
+        .kpi-sub { font-size: 0.7rem; color: var(--text-dim); margin-top: 4px; }
+
+        .chart-container {
+            background: var(--card-bg); border: 1px solid var(--card-border);
+            border-radius: var(--radius); padding: 20px; margin-bottom: 24px;
+        }
+        .chart-title { font-size: 0.9rem; color: var(--text-dim); margin-bottom: 12px; }
+        canvas { max-height: 300px; }
+
+        .trades-feed {
+            background: var(--card-bg); border: 1px solid var(--card-border);
+            border-radius: var(--radius); overflow: hidden;
+        }
+        .trades-header { display: flex; justify-content: space-between; padding: 14px 20px; border-bottom: 1px solid var(--card-border); }
+        .trades-header span { font-size: 0.9rem; color: var(--text-dim); }
+        table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+        th { background: #0d1220; padding: 10px 14px; text-align: left; color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase; }
+        td { padding: 8px 14px; border-top: 1px solid var(--card-border); }
+        .dir-long { color: var(--green); }
+        .dir-short { color: var(--red); }
+        .pnl-pos { color: var(--green); }
+        .pnl-neg { color: var(--red); }
+        .badge-tp { background: var(--green-bg); color: var(--green); padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; }
+        .badge-sl { background: var(--red-bg); color: var(--red); padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; }
+        .badge-time { background: rgba(255,181,71,0.1); color: var(--yellow); padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; }
+
+        .status-bar {
+            background: var(--card-bg); border: 1px solid var(--card-border);
+            border-radius: var(--radius); padding: 14px 20px; margin-bottom: 24px;
+            display: flex; justify-content: space-between; align-items: center; font-size: 0.8rem;
+        }
+        .cb-ok { color: var(--green); }
+        .cb-halted { color: var(--red); font-weight: 600; }
+        .progress-bar { width: 100px; height: 4px; background: var(--card-border); border-radius: 2px; margin-top: 4px; overflow: hidden; }
+        .progress-fill { height: 100%; background: var(--blue); transition: width 0.3s; }
+
+        .two-cols { display: grid; grid-template-columns: 1.5fr 1fr; gap: 24px; }
+        @media (max-width: 768px) { .two-cols { grid-template-columns: 1fr; } }
+
+        .tab { display: inline-block; padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 0.8rem; margin-right: 8px; }
+        .tab-active { background: var(--blue); color: white; }
+        .tab-inactive { background: var(--card-bg); color: var(--text-dim); border: 1px solid var(--card-border); }
+        a { color: var(--blue); text-decoration: none; }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <div>
+        <h1>Synthetic Trader <span style="font-size:0.8rem;color:var(--text-dim);">v0.2.0</span></h1>
+        <h2>Live Dashboard — Real-time Trading Monitor</h2>
+    </div>
+    <div style="text-align: right;">
+        <div class="connection-status">
+            <div class="dot dot-disconnected" id="conn-dot"></div>
+            <span id="conn-status">Disconnected</span>
+        </div>
+        <div style="margin-top:8px;">
+            <a href="/dashboard/backtest" class="tab tab-inactive">Backtest Dashboard</a>
+            <a href="/" class="tab tab-active">Live Dashboard</a>
+        </div>
+    </div>
+</div>
+
+<!-- Status Bar -->
+<div class="status-bar">
+    <div>
+        <span style="color:var(--text-dim);">Strategy:</span> <strong>RangeBreak</strong>
+        <span style="color:var(--text-dim);margin-left:16px;">Symbol:</span> <strong id="symbol">RB100</strong>
+        <span style="color:var(--text-dim);margin-left:16px;">Mode:</span> <strong id="mode">—</strong>
+    </div>
+    <div>
+        <span id="cb-status" class="cb-ok">Circuit Breaker: OK</span>
+    </div>
+</div>
+
+<!-- Daily Report -->
+<div class="status-bar">
+    <div>
+        <span style="color:var(--text-dim);">Fecha:</span> <strong id="daily-date">—</strong>
+        <span style="margin-left:16px;">P&L diario:</span> <strong id="daily-pnl">$0.00</strong>
+        <span style="margin-left:16px;">Win Rate:</span> <strong id="daily-wr">—</strong>
+    </div>
+    <div>
+        <span style="color:var(--text-dim);">Trades hoy:</span> <strong id="daily-trades">0</strong>
+        <span style="margin-left:16px;">Max DD:</span> <strong id="daily-dd">—</strong>
+        <span style="margin-left:16px;">Sharpe:</span> <strong id="daily-sharpe">—</strong>
+    </div>
+</div>
+
+<!-- KPIs -->
+<div class="kpi-grid" id="kpi-grid">
+    <div class="kpi-card"><div class="kpi-label">Balance</div><div class="kpi-value" id="kpi-balance">$10,000.00</div></div>
+    <div class="kpi-card"><div class="kpi-label">Total P&L</div><div class="kpi-value" id="kpi-pnl">$0.00</div><div class="kpi-sub" id="kpi-pnl-pct">0.00%</div></div>
+    <div class="kpi-card"><div class="kpi-label">Win Rate</div><div class="kpi-value" id="kpi-wr">—</div></div>
+    <div class="kpi-card"><div class="kpi-label">Trades</div><div class="kpi-value" id="kpi-trades">0</div></div>
+    <div class="kpi-card"><div class="kpi-label">Sharpe</div><div class="kpi-value" id="kpi-sharpe">—</div></div>
+    <div class="kpi-card"><div class="kpi-label">Max DD</div><div class="kpi-value" id="kpi-dd">—</div></div>
+    <div class="kpi-card"><div class="kpi-label">Expectancy</div><div class="kpi-value" id="kpi-expectancy">—</div></div>
+    <div class="kpi-card"><div class="kpi-label">Gate</div><div class="kpi-value" id="kpi-gate">—</div></div>
+</div>
+
+<!-- Charts -->
+<div class="two-cols">
+    <div class="chart-container">
+        <div class="chart-title">Equity Curve (Live)</div>
+        <canvas id="equity-chart"></canvas>
+    </div>
+    <div class="chart-container">
+        <div class="chart-title">Circuit Breaker Status</div>
+        <div id="cb-panel" style="padding:20px 0;">
+            <div style="font-size:0.8rem;color:var(--text-dim);margin-bottom:12px;">Detalle del estado:</div>
+            <div id="cb-detail" style="font-size:0.85rem;line-height:1.8;">
+                <div><span style="color:var(--text-dim);">Consecutive Losses:</span> <strong id="cb-losses">0</strong></div>
+                <div><span style="color:var(--text-dim);">Halted:</span> <strong id="cb-halted">No</strong></div>
+                <div><span style="color:var(--text-dim);">Reason:</span> <span id="cb-reason">—</span></div>
+                <div><span style="color:var(--text-dim);">Cooldown:</span> <strong id="cb-cooldown">0 min</strong></div>
+                <div><span style="color:var(--text-dim);">Daily DD Limit:</span> 5%</div>
+                <div><span style="color:var(--text-dim);">CB Threshold:</span> 3 losses</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Trade Feed -->
+<div class="trades-feed">
+    <div class="trades-header">
+        <span>📋 Trade Feed (Live)</span>
+        <span id="trade-count">0 trades</span>
+    </div>
+    <table>
+        <thead>
+            <tr><th>#</th><th>Dir</th><th>Entry</th><th>Exit</th><th>P&L</th><th>R</th><th>Duration</th><th>Reason</th></tr>
+        </thead>
+        <tbody id="trades-body">
+            <tr><td colspan="8" style="text-align:center;color:var(--text-dim);padding:24px;">Conectando al WebSocket...</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<script>
+let ws = null;
+let equityChart = null;
+let equityData = [];
+let equityLabels = [];
+let tradesReceived = [];
+
+// Chart setup
+const ectx = document.getElementById('equity-chart').getContext('2d');
+equityChart = new Chart(ectx, {
+    type: 'line',
+    data: { labels: [], datasets: [{
+        label: 'Equity', data: [],
+        borderColor: '#4d8dff', backgroundColor: 'rgba(77,141,255,0.08)',
+        fill: true, tension: 0.1, pointRadius: 0, borderWidth: 2,
+    }]},
+    options: {
+        responsive: true,
+        plugins: { legend: { display: false } },
+        scales: {
+            x: { display: false },
+            y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#6b7593', callback: v => '$' + v.toFixed(0) } }
+        }
+    }
+});
+
+function setConnStatus(status) {
+    const dot = document.getElementById('conn-dot');
+    const text = document.getElementById('conn-status');
+    dot.className = 'dot dot-' + status;
+    text.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+}
+
+function connect() {
+    const wsUrl = `ws://${window.location.host}/ws/live-data`;
+    setConnStatus('connecting');
+    ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => setConnStatus('connected');
+
+    ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        handleMessage(msg);
+    };
+
+    ws.onclose = () => {
+        setConnStatus('disconnected');
+        setTimeout(connect, 3000); // reconnect
+    };
+
+    ws.onerror = () => setConnStatus('disconnected');
+}
+
+function handleMessage(msg) {
+    // Backtest replay mode (original)
+    if (msg.type === 'equity') {
+        equityData.push(msg.value);
+        equityLabels.push(msg.index);
+        equityChart.data.labels = equityLabels;
+        equityChart.data.datasets[0].data = equityData;
+        equityChart.update('none');
+
+        // Update KPIs
+        document.getElementById('kpi-balance').textContent = '$' + msg.value.toFixed(2);
+        if (equityData.length > 1) {
+            const pnl = msg.value - equityData[0];
+            const pnlPct = (pnl / equityData[0]) * 100;
+            const pnlEl = document.getElementById('kpi-pnl');
+            pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+            pnlEl.style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+            document.getElementById('kpi-pnl-pct').textContent = (pnlPct >= 0 ? '+' : '') + pnlPct.toFixed(2) + '%';
+        }
+
+        // Progress
+        const progress = (msg.index + 1) / msg.total * 100;
+    }
+
+    // Realtime mode: state update (paper trading)
+    else if (msg.type === 'state') {
+        const state = msg.data;
+        const balance = state.balance || 0;
+        const pnl = state.pnl || 0;
+        const pnlPct = balance > 0 ? (pnl / (balance - pnl)) * 100 : 0;
+
+        // Update KPIs from state
+        document.getElementById('kpi-balance').textContent = '$' + balance.toFixed(2);
+        const pnlEl = document.getElementById('kpi-pnl');
+        pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+        pnlEl.style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+        document.getElementById('kpi-pnl-pct').textContent = (pnlPct >= 0 ? '+' : '') + pnlPct.toFixed(2) + '%';
+        document.getElementById('kpi-trades').textContent = state.trades_today || 0;
+
+        // Update symbol
+        if (state.symbol) document.getElementById('symbol').textContent = state.symbol;
+        if (state.mode) document.getElementById('mode').textContent = state.mode.toUpperCase();
+
+        // Circuit breaker
+        if (state.circuit_breaker) {
+            const cb = state.circuit_breaker;
+            document.getElementById('cb-losses').textContent = cb.consecutive_losses || 0;
+            document.getElementById('cb-halted').textContent = cb.is_halted ? 'YES' : 'No';
+            document.getElementById('cb-halted').style.color = cb.is_halted ? 'var(--red)' : 'var(--green)';
+            document.getElementById('cb-reason').textContent = cb.halt_reason || '—';
+            document.getElementById('cb-cooldown').textContent = (cb.cooldown_minutes || 0) + ' min';
+
+            const cbStatus = document.getElementById('cb-status');
+            if (cb.is_halted) {
+                cbStatus.textContent = '⚠ Circuit Breaker: HALTED';
+                cbStatus.className = 'cb-halted';
+            } else {
+                cbStatus.textContent = '✓ Circuit Breaker: OK';
+                cbStatus.className = 'cb-ok';
+            }
+        }
+    }
+
+    // Realtime mode: equity update
+    else if (msg.type === 'equity_update') {
+        const eq = msg.data;
+        if (eq && eq.equity !== undefined) {
+            equityData.push(eq.equity);
+            equityLabels.push(equityData.length);
+            equityChart.data.labels = equityLabels;
+            equityChart.data.datasets[0].data = equityData;
+            equityChart.update('none');
+        }
+    }
+
+    // Both modes: trade received
+    else if (msg.type === 'trade') {
+        const trade = msg.data || msg.trade; // realtime uses msg.data, backtest uses msg.trade
+        tradesReceived.push(trade);
+        addTradeRow(trade, tradesReceived.length);
+        document.getElementById('trade-count').textContent = tradesReceived.length + ' trades';
+    }
+
+    else if (msg.type === 'status') {
+        // Periodic status — fetch full status
+        fetchBotStatus();
+    }
+}
+
+function addTradeRow(trade, idx) {
+    const tbody = document.getElementById('trades-body');
+    if (idx === 1) tbody.innerHTML = ''; // clear "connecting" message
+
+    const dirClass = trade.direction === 'LONG' ? 'dir-long' : 'dir-short';
+    const pnlClass = trade.pnl >= 0 ? 'pnl-pos' : 'pnl-neg';
+    const badge = trade.exit_reason === 'TP' ? 'badge-tp' : trade.exit_reason === 'SL' ? 'badge-sl' : 'badge-time';
+    const durSec = trade.duration || trade.duration_seconds || 0;
+    const duration = Math.floor(durSec / 60) + 'm ' + (durSec % 60) + 's';
+
+    const row = `<tr>
+        <td style="color:var(--text-dim);">${idx}</td>
+        <td class="${dirClass}">${trade.direction}</td>
+        <td>${trade.entry_price.toFixed(2)}</td>
+        <td>${trade.exit_price.toFixed(2)}</td>
+        <td class="${pnlClass}">${trade.pnl >= 0 ? '+' : ''}$${trade.pnl.toFixed(3)}</td>
+        <td>${trade.pnl_pct >= 0 ? '+' : ''}${trade.pnl_pct.toFixed(2)}R</td>
+        <td style="color:var(--text-dim);">${duration}</td>
+        <td><span class="${badge}">${trade.exit_reason}</span></td>
+    </tr>`;
+    tbody.insertAdjacentHTML('beforeend', row);
+}
+
+async function fetchBotStatus() {
+    try {
+        const res = await fetch('/api/bot/status');
+        const data = await res.json();
+
+        // Update KPIs from full report
+        if (data.kpi) {
+            document.getElementById('kpi-wr').textContent = data.circuit_breaker && data.trades_today > 0 ? '—' : '—';
+            document.getElementById('kpi-trades').textContent = data.trades_today || 0;
+            document.getElementById('kpi-sharpe').textContent = data.kpi.sharpe_ratio ? data.kpi.sharpe_ratio.toFixed(3) : '—';
+            document.getElementById('kpi-dd').textContent = data.kpi.max_drawdown !== undefined ? (data.kpi.max_drawdown * 100).toFixed(2) + '%' : '—';
+            document.getElementById('kpi-expectancy').textContent = data.kpi.expectancy ? data.kpi.expectancy.toFixed(3) + 'R' : '—';
+            if (data.gate_passed !== undefined) {
+                const gateEl = document.getElementById('kpi-gate');
+                gateEl.textContent = data.gate_passed ? 'PASSED' : 'FAILED';
+                gateEl.style.color = data.gate_passed ? 'var(--green)' : 'var(--red)';
+            }
+        }
+
+        // Update mode
+        if (data.mode) document.getElementById('mode').textContent = data.mode.toUpperCase();
+
+        // Circuit Breaker
+        if (data.circuit_breaker) {
+            const cb = data.circuit_breaker;
+            document.getElementById('cb-losses').textContent = cb.consecutive_losses || 0;
+            document.getElementById('cb-halted').textContent = cb.is_halted ? 'YES' : 'No';
+            document.getElementById('cb-halted').style.color = cb.is_halted ? 'var(--red)' : 'var(--green)';
+            document.getElementById('cb-reason').textContent = cb.halt_reason || '—';
+            document.getElementById('cb-cooldown').textContent = (cb.cooldown_minutes || 0) + ' min';
+
+            const cbStatus = document.getElementById('cb-status');
+            if (cb.is_halted) {
+                cbStatus.textContent = '⚠ Circuit Breaker: HALTED';
+                cbStatus.className = 'cb-halted';
+            } else {
+                cbStatus.textContent = '✓ Circuit Breaker: OK';
+                cbStatus.className = 'cb-ok';
+            }
+        }
+    } catch (e) {
+        console.log('Status fetch error:', e);
+    }
+}
+
+// NEW: Fetch daily report
+async function fetchDailyReport() {
+    try {
+        const res = await fetch('/api/daily/report');
+        const data = await res.json();
+        
+        if (!data.error) {
+            const pnlClass = data.total_pnl >= 0 ? 'pnl-pos' : 'pnl-neg';
+            const pnlSign = data.total_pnl >= 0 ? '+' : '';
+            const ddClass = data.max_drawdown <= 0.05 ? '' : 'pnl-neg'; // Red if >5%
+            
+            document.getElementById('daily-date').textContent = data.date;
+            document.getElementById('daily-pnl').innerHTML = `<span class="${pnlClass}">${pnlSign}$${Math.abs(data.total_pnl).toFixed(2)}</span>`;
+            document.getElementById('daily-wr').textContent = (data.win_rate * 100).toFixed(1) + '%';
+            document.getElementById('daily-trades').textContent = data.total_trades;
+            document.getElementById('daily-dd').innerHTML = `<span class="${ddClass}">${(data.max_drawdown * 100).toFixed(2)}%</span>`;
+            document.getElementById('daily-sharpe').textContent = data.sharpe_ratio ? data.sharpe_ratio.toFixed(2) : '—';
+        } else {
+            // No data yet
+            document.getElementById('daily-date').textContent = '—';
+            document.getElementById('daily-pnl').textContent = '$0.00';
+            document.getElementById('daily-wr').textContent = '—';
+            document.getElementById('daily-trades').textContent = '0';
+            document.getElementById('daily-dd').textContent = '—';
+            document.getElementById('daily-sharpe').textContent = '—';
+        }
+    } catch (e) {
+        console.log('Daily report fetch error:', e);
+    }
+}
+
+// Initial fetch + connect + start timers
+fetchBotStatus();
+fetchDailyReport();
+connect();
+
+// Update status every 5 seconds
+setInterval(fetchBotStatus, 5000);
+// Update daily report every minute (less frequent)
+setInterval(fetchDailyReport, 60000);
+</script>
+
+</body>
+</html>

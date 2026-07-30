@@ -1,15 +1,25 @@
-"""Backtest engine — replays historical data and evaluates strategy performance."""
+"""Backtest engine — replays historical data and evaluates strategy performance.
+
+Incluye:
+- Spread y slippage simulation (configurable)
+- Latency simulation: delay 100-500ms entre señal y ejecución
+- Circuit breaker dual integration
+- Kelly dinámico (confidence + volatility_multiplier)
+- Gate evaluation: Sharpe>1.2, DD<12%, WR>52%, Expectancy>0.15R
+"""
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+import logging
+import random
 import numpy as np
 import pandas as pd
 
-from src.strategy.base import Signal, SignalType, Strategy
+from src.strategies.base import Signal, SignalType, Strategy
 from src.risk.manager import RiskManager, RiskConfig
+from src.risk.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -119,11 +129,43 @@ class BacktestEngine:
         risk_config: RiskConfig,
         spread_pips: float = 0.3,
         slippage_pips: float = 0.15,
-    ):
+        latency_ms_min: int = 100,
+        latency_ms_max: int = 500,
+        use_dynamic_kelly: bool = True,
+        use_circuit_breaker: bool = True,
+        candle_granularity_s: int = 60,
+    ) -> None:
+        """Initialize backtest engine.
+
+        Args:
+            strategy: Strategy to backtest
+            risk_config: Risk configuration
+            spread_pips: Spread cost per trade in pips
+            slippage_pips: Base slippage in pips
+            latency_ms_min: Minimum simulated latency (ms) between signal and execution
+            latency_ms_max: Maximum simulated latency (ms)
+            use_dynamic_kelly: Use position_size_dynamic (confidence + vol multiplier)
+            use_circuit_breaker: Use dual circuit breaker (consecutive losses + DD)
+            candle_granularity_s: Seconds per candle (for latency-to-candles conversion)
+        """
         self.strategy = strategy
         self.risk_manager = RiskManager(risk_config)
         self.spread_pips = spread_pips
         self.slippage_pips = slippage_pips
+        self.latency_ms_min = latency_ms_min
+        self.latency_ms_max = latency_ms_max
+        self.use_dynamic_kelly = use_dynamic_kelly
+        self.use_circuit_breaker = use_circuit_breaker
+        self.candle_granularity_s = candle_granularity_s
+        # Dual circuit breaker (defaults: 3 consecutive losses, 5% daily DD)
+        self.circuit_breaker: CircuitBreaker | None = (
+            CircuitBreaker(CircuitBreakerConfig(
+                consecutive_losses_threshold=3,
+                daily_drawdown_threshold=risk_config.max_daily_drawdown,
+            ))
+            if use_circuit_breaker
+            else None
+        )
 
     def run(self, data: pd.DataFrame, initial_capital: float = 10000.0) -> BacktestResult:
         """
@@ -167,17 +209,35 @@ class BacktestEngine:
             if signal.type == SignalType.NO_SIGNAL:
                 continue
 
-            # Check risk
+            # Check risk — circuit breaker dual (if enabled) supersedes risk manager
+            if self.circuit_breaker is not None:
+                cb_can, cb_reason = self.circuit_breaker.can_trade()
+                if not cb_can:
+                    logger.debug("Trade skipped by circuit breaker: %s", cb_reason)
+                    continue
             can, reason = self.risk_manager.can_trade()
             if not can:
                 logger.debug("Trade skipped: %s", reason)
                 continue
 
-            # Calculate position size
+            # Calculate position size — Kelly dinámico (confidence + vol multiplier)
             win_prob = self.strategy.get_win_probability(signal)
             win_amount = abs(signal.take_profit - signal.entry_price)
             loss_amount = abs(signal.entry_price - signal.stop_loss)
-            size = self.risk_manager.position_size(capital, win_prob, win_amount, loss_amount)
+
+            if self.use_dynamic_kelly and signal.confidence > 0:
+                # Volatility multiplier from signal metadata (ATR ratio)
+                atr_ratio = signal.metadata.get("atr_ratio", 1.0)
+                vol_mult = 1.0 + max(0.0, (atr_ratio - 1.0))
+                size = self.risk_manager.position_size_dynamic(
+                    capital, win_prob, win_amount, loss_amount,
+                    confidence=signal.confidence,
+                    volatility_multiplier=vol_mult,
+                )
+            else:
+                size = self.risk_manager.position_size(
+                    capital, win_prob, win_amount, loss_amount
+                )
 
             if size <= 0:
                 continue
@@ -199,8 +259,14 @@ class BacktestEngine:
             trade.pnl -= cost
             capital += trade.pnl
 
-            # Record trade
+            # Record trade — update risk manager + circuit breaker
             self.risk_manager.record_trade(trade.pnl, capital)
+            if self.circuit_breaker is not None:
+                self.circuit_breaker.update(
+                    loss=trade.pnl < 0,
+                    current_balance=capital,
+                    starting_balance=self.risk_manager.today.starting_balance if self.risk_manager.today else capital,
+                )
             result.trades.append(trade)
             equity.append(capital)
 
@@ -214,8 +280,12 @@ class BacktestEngine:
         # Calculate metrics
         self._compute_metrics(result, equity, max_dd, initial_capital)
 
-        logger.info("Backtest complete: %d trades, P&L=%.2f, Sharpe=%.3f",
-                     result.total_trades, result.total_pnl, result.sharpe_ratio)
+        logger.info(
+            "Backtest complete: %d trades, P&L=%.2f, Sharpe=%.3f",
+            result.total_trades,
+            result.total_pnl,
+            result.sharpe_ratio,
+        )
 
         return result
 
@@ -227,15 +297,49 @@ class BacktestEngine:
         size: float,
         capital: float,
     ) -> Trade | None:
-        """Simulate a single trade from entry to TP/SL/time exit."""
-        entry_candle = data.iloc[entry_index]
+        """Simulate a single trade from entry to TP/SL/time exit.
+
+        Incluye latency simulation: delay aleatorio entre señal y ejecución
+        (100-500ms por defecto). Si el delay excede la granularity del candle,
+        la entrada se ejecuta en la siguiente candle con slippage adverso.
+
+        Args:
+            signal: Trading signal to execute
+            data: OHLCV DataFrame
+            entry_index: Index of entry candle in data
+            size: Position size in USD
+            capital: Current account balance
+
+        Returns:
+            Completed trade or None if no exit found
+        """
+        # Simulate latency: delay between signal and execution (100-500ms)
+        latency_ms = random.randint(self.latency_ms_min, self.latency_ms_max)
+        latency_slippage_pips = (latency_ms / 1000.0) * 2.0  # ~2 pips per second of delay
+        price_tick = 0.01  # minimum tick for synthetic indices
+
+        # If latency exceeds candle granularity, entry moves to next candle
+        execution_index = entry_index
+        if latency_ms > self.candle_granularity_s * 1000:
+            execution_index = entry_index + 1
+            if execution_index >= len(data):
+                return None  # no candle to execute on
+
+        latency_slippage = latency_slippage_pips * price_tick
+
+        entry_candle = data.iloc[execution_index]
         entry_time = int(entry_candle["epoch"])
-        entry_price = signal.entry_price
+
+        # Apply slippage against the trader (worse entry price)
+        if signal.type == SignalType.LONG:
+            entry_price = signal.entry_price + latency_slippage
+        else:  # SHORT
+            entry_price = signal.entry_price - latency_slippage
 
         # R-multiple denominator: the dollar risk per unit at entry
-        # = size * (distance from entry to SL / entry_price)
-        sl_distance = abs(signal.entry_price - signal.stop_loss)
-        risk_amount = size * (sl_distance / signal.entry_price) if signal.entry_price > 0 else 0
+        sl_distance = abs(entry_price - signal.stop_loss)
+        risk_amount = size * (sl_distance / entry_price) if entry_price > 0 else 0
+
         # Guard against zero risk (shouldn't happen with valid channels)
         if risk_amount <= 0:
             risk_amount = size
@@ -245,7 +349,7 @@ class BacktestEngine:
             return pnl_usd / risk_amount if risk_amount > 0 else 0.0
 
         # Look ahead for exit
-        max_candles = signal.duration_seconds // 60  # Assuming 1-min candles
+        max_candles = signal.duration_seconds // 60  # Assuming 1-minute candles
 
         for j in range(entry_index + 1, min(entry_index + max_candles + 1, len(data))):
             candle = data.iloc[j]
@@ -257,39 +361,49 @@ class BacktestEngine:
             if signal.type == SignalType.LONG:
                 # Check SL first (worst case)
                 if low <= signal.stop_loss:
-                    pnl = -size * (abs(signal.entry_price - signal.stop_loss) / signal.entry_price)
-                    return Trade(entry_time, epoch, "LONG", entry_price,
-                                 signal.stop_loss, signal.stop_loss, signal.take_profit,
-                                 pnl, r_multiple(pnl), epoch - entry_time, False, "SL")
+                    pnl = -size * (abs(entry_price - signal.stop_loss) / entry_price)
+                    return Trade(
+                        entry_time, epoch, "LONG", entry_price,
+                        signal.stop_loss, signal.stop_loss, signal.take_profit,
+                        pnl, r_multiple(pnl), epoch - entry_time, False, "SL"
+                    )
 
                 # Check TP
                 if high >= signal.take_profit:
-                    pnl = size * (abs(signal.take_profit - signal.entry_price) / signal.entry_price)
-                    return Trade(entry_time, epoch, "LONG", entry_price,
-                                 signal.take_profit, signal.stop_loss, signal.take_profit,
-                                 pnl, r_multiple(pnl), epoch - entry_time, True, "TP")
+                    pnl = size * (abs(signal.take_profit - entry_price) / entry_price)
+                    return Trade(
+                        entry_time, epoch, "LONG", entry_price,
+                        signal.take_profit, signal.stop_loss, signal.take_profit,
+                        pnl, r_multiple(pnl), epoch - entry_time, True, "TP"
+                    )
 
             elif signal.type == SignalType.SHORT:
                 # Check SL first
                 if high >= signal.stop_loss:
-                    pnl = -size * (abs(signal.stop_loss - signal.entry_price) / signal.entry_price)
-                    return Trade(entry_time, epoch, "SHORT", entry_price,
-                                 signal.stop_loss, signal.stop_loss, signal.take_profit,
-                                 pnl, r_multiple(pnl), epoch - entry_time, False, "SL")
+                    pnl = -size * (abs(signal.stop_loss - entry_price) / entry_price)
+                    return Trade(
+                        entry_time, epoch, "SHORT", entry_price,
+                        signal.stop_loss, signal.stop_loss, signal.take_profit,
+                        pnl, r_multiple(pnl), epoch - entry_time, False, "SL"
+                    )
 
                 # Check TP
                 if low <= signal.take_profit:
-                    pnl = size * (abs(signal.entry_price - signal.take_profit) / signal.entry_price)
-                    return Trade(entry_time, epoch, "SHORT", entry_price,
-                                 signal.take_profit, signal.stop_loss, signal.take_profit,
-                                 pnl, r_multiple(pnl), epoch - entry_time, True, "TP")
+                    pnl = size * (abs(entry_price - signal.take_profit) / entry_price)
+                    return Trade(
+                        entry_time, epoch, "SHORT", entry_price,
+                        signal.take_profit, signal.stop_loss, signal.take_profit,
+                        pnl, r_multiple(pnl), epoch - entry_time, True, "TP"
+                    )
 
             # Time exit
             if epoch - entry_time >= signal.duration_seconds:
                 pnl = size * ((close - entry_price) / entry_price) * (1 if signal.type == SignalType.LONG else -1)
-                return Trade(entry_time, epoch, signal.type.value, entry_price,
-                             close, signal.stop_loss, signal.take_profit,
-                             pnl, r_multiple(pnl), epoch - entry_time, pnl > 0, "TIME")
+                return Trade(
+                    entry_time, epoch, signal.type.value, entry_price,
+                    close, signal.stop_loss, signal.take_profit,
+                    pnl, r_multiple(pnl), epoch - entry_time, pnl > 0, "TIME"
+                )
 
         return None
 
@@ -320,7 +434,7 @@ class BacktestEngine:
         # Profit factor
         gross_profit = sum(t.pnl for t in result.trades if t.pnl > 0)
         gross_loss = abs(sum(t.pnl for t in result.trades if t.pnl < 0))
-        result.profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+        result.profit_factor = gross_profit / gross_loss if gross_loss > 0 else 999.0
 
         # Expectancy in R
         wins_r = [t.pnl_pct for t in result.trades if t.win]

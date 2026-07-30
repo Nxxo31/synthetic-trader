@@ -2,13 +2,28 @@
 # API credentials loaded from .env or environment variables
 
 deriv:
-  # WebSocket endpoint (public for market data, authenticated for trading)
-  endpoint: "wss://ws.derivws.com/websockets/v3"
-  # App ID from https://api.deriv.com/dashboard
-  # 1089 = public testing app_id (market data only, no trading)
-  app_id: 1089
+  # New Deriv API (developers.deriv.com) — REST + WebSocket hybrid
+  # REST base URL for OTP and account management
+  api_base_url: "https://api.derivws.com"
+  # WebSocket paths (OTP flow returns full URL with token)
+  ws_demo_path: "/trading/v1/options/ws/demo"
+  ws_real_path: "/trading/v1/options/ws/real"
+  ws_public_path: "/trading/v1/options/ws/public"
+  # OTP endpoint path
+  otp_path: "/trading/v1/options/accounts"
+  # App ID from https://developers.deriv.com/dashboard/applications
+  # Alphanumeric PAT app ID (NOT the legacy numeric 1089)
+  app_id: "33Y5EmAQJgXagwIUJQ8Vw"
+  # Account IDs (from GET /trading/v1/options/accounts)
+  demo_account: "DOT93744719"
+  real_account: "ROT92215439"
   # Set to false for real account (DANGER: requires explicit approval)
   is_demo: true
+  # OTP lifetime (seconds) — Deriv OTPs are valid for 120s, single use
+  otp_lifetime: 120
+  # Legacy endpoint (deprecated — kept for reference only)
+  legacy_endpoint: "wss://ws.derivws.com/websockets/v3"
+  legacy_app_id: 1089
 
 # Instruments to trade
 instruments:

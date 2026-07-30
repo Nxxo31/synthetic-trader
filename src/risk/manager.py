@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class RiskConfig:
     """Risk management configuration — NON-NEGOTIABLE."""
-    max_risk_per_trade: float = 0.015      # 1.5% of capital
+    max_risk_per_trade: float = 0.03       # 3% of capital (aggressive but safe with dual circuit breaker)
     max_daily_drawdown: float = 0.05       # 5% daily loss limit
     max_trades_per_day: int = 8            # Max 8 trades per day
     circuit_breaker_losses: int = 5        # Halt after 5 consecutive losses
@@ -134,6 +134,83 @@ class RiskManager:
         logger.info(
             "Position size: %.2f USD (Kelly=%.4f, QK=%.4f, cap=%.2f)",
             size, kelly, quarter_kelly, max_risk,
+        )
+        return round(size, 2)
+
+    def position_size_dynamic(
+        self,
+        capital: float,
+        win_probability: float,
+        win_amount: float,
+        loss_amount: float,
+        confidence: float = 1.0,
+        volatility_multiplier: float = 1.0,
+    ) -> float:
+        """Kelly dinámico — ajusta por confidence (score) y volatilidad.
+
+        Fórmula:
+            # Ajustar win probability por confidence como factor de confluencia suave
+            # Mantiene win_probability > 0.5 cuando la base ya tenía edge
+            p = 0.5 + (win_probability - 0.5) * confidence if confidence < 1.0 else win_probability
+            # Equivalentemente: p = win_probability * confidence + 0.5 * (1 - confidence)
+            kelly = (p * b - q) / b                    # Kelly clásico
+            adjusted = kelly * kelly_fraction / volatility_multiplier
+            size = min(adjusted * capital, max_risk)   # cap de seguridad
+
+        Donde volatility_multiplier reduce el tamaño en mercados volátiles:
+            volatility_multiplier = 1.0 + max(0, (atr_ratio - 1.0))
+
+        Args:
+            capital: balance actual
+            win_probability: probabilidad base de ganar (de Strategy.get_win_probability)
+            win_amount: ganancia si gana
+            loss_amount: pérdida si pierde
+            confidence: score del signal scorer (0-1), default 1.0 (sin ajuste)
+            volatility_multiplier: factor de reducción por volatilidad (>=1.0)
+
+        Returns:
+            Tamaño de posición en USD (0.0 si no hay edge)
+        """
+        # Ajustar win probability por confidence como factor de confluencia
+        # Si confidence=1.0 → p = win_probability (sin cambio)
+        # Si confidence=0.0 → p = 0.5 (edge neutral)
+        # Si confidence=0.5 → p = 0.5 + 0.5*(win_probability - 0.5) = mitad hacia edge neutral
+        confidence = max(0.0, min(1.0, confidence))
+        if confidence < 1.0:
+            p = 0.5 + (win_probability - 0.5) * confidence
+        else:
+            p = win_probability
+        # Clamp por seguridad (evitar extremos)
+        p = min(0.99, max(0.01, p))
+        q = 1.0 - p
+
+        b = win_amount / loss_amount if loss_amount > 0 else 0.0
+        if b <= 0:
+            logger.warning("Kelly dinámico: b<=0 (win_amount=%.4f, loss_amount=%.4f)",
+                           win_amount, loss_amount)
+            return 0.0
+
+        kelly = (p * b - q) / b
+        if kelly <= 0:
+            logger.warning("Kelly dinámico <= 0 (p=%.3f, b=%.3f, conf=%.3f). No edge.",
+                           p, b, confidence)
+            return 0.0
+
+        # Reducir Kelly en mercados volátiles (no ampliarlo)
+        vm = max(1.0, volatility_multiplier)
+        adjusted_fraction = kelly * self.config.kelly_fraction / vm
+
+        # Cap de seguridad
+        max_risk = self.config.max_risk_per_trade * capital
+        size = min(adjusted_fraction * capital, max_risk)
+
+        if size <= 0:
+            return 0.0
+
+        logger.info(
+            "Position size (dynamic): %.2f USD (Kelly=%.4f, adj_frac=%.4f, "
+            "conf=%.3f, vol_mult=%.3f, cap=%.2f)",
+            size, kelly, adjusted_fraction, confidence, vm, max_risk,
         )
         return round(size, 2)
 

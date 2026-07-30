@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Synthetic Trader — Backtest Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <style>
+        :root {
+            --bg: #0a0e17;
+            --card-bg: #131826;
+            --card-border: #1e2438;
+            --text: #e0e6f0;
+            --text-dim: #6b7593;
+            --green: #00d68f;
+            --green-bg: rgba(0, 214, 143, 0.1);
+            --red: #ff4d6d;
+            --red-bg: rgba(255, 77, 109, 0.1);
+            --yellow: #ffb547;
+            --blue: #4d8dff;
+            --purple: #a855f7;
+            --radius: 12px;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            padding: 24px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        h1 { font-size: 1.6rem; margin-bottom: 4px; }
+        h2 { font-size: 1.1rem; color: var(--text-dim); margin-bottom: 20px; font-weight: 400; }
+        .header { margin-bottom: 32px; }
+        .version {
+            display: inline-block;
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            padding: 2px 10px;
+            border-radius: 6px;
+            font-size: 0.7rem;
+            color: var(--text-dim);
+            margin-left: 8px;
+        }
+        .gate-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 12px;
+            border-radius: 6px;
+            font-weight: 600;
+            font-size: 0.85rem;
+            margin-top: 8px;
+        }
+        .gate-pass { background: var(--green-bg); color: var(--green); }
+        .gate-fail { background: var(--red-bg); color: var(--red); }
+
+        .kpi-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        .kpi-card {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: var(--radius);
+            padding: 20px;
+        }
+        .kpi-label { color: var(--text-dim); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+        .kpi-value { font-size: 1.5rem; font-weight: 700; }
+        .kpi-sub { font-size: 0.7rem; color: var(--text-dim); margin-top: 4px; }
+
+        .chart-container {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: var(--radius);
+            padding: 20px;
+            margin-bottom: 24px;
+        }
+        .chart-title { font-size: 0.9rem; color: var(--text-dim); margin-bottom: 12px; }
+        canvas { max-height: 300px; }
+
+        .trades-table {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: var(--radius);
+            overflow: hidden;
+            margin-bottom: 24px;
+        }
+        table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+        th { background: #0d1220; padding: 10px 12px; text-align: left; color: var(--text-dim); font-weight: 600; text-transform: uppercase; font-size: 0.7rem; letter-spacing: 0.5px; }
+        td { padding: 8px 12px; border-top: 1px solid var(--card-border); }
+        tr:hover { background: rgba(255,255,255,0.02); }
+        .dir-long { color: var(--green); font-weight: 600; }
+        .dir-short { color: var(--red); font-weight: 600; }
+        .pnl-pos { color: var(--green); }
+        .pnl-neg { color: var(--red); }
+        .badge-tp { background: var(--green-bg); color: var(--green); padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; }
+        .badge-sl { background: var(--red-bg); color: var(--red); padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; }
+        .badge-time { background: rgba(255, 181, 71, 0.1); color: var(--yellow); padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; }
+
+        .config-panel {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: var(--radius);
+            padding: 20px;
+            margin-bottom: 24px;
+        }
+        .config-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; }
+        .config-item { font-size: 0.78rem; }
+        .config-item .label { color: var(--text-dim); }
+        .config-item .value { color: var(--text); font-weight: 600; }
+
+        .two-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+        @media (max-width: 768px) { .two-cols { grid-template-columns: 1fr; } }
+
+        .empty { text-align: center; padding: 40px; color: var(--text-dim); }
+        #file-input { display: none; }
+        .load-btn {
+            background: var(--blue);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            margin-bottom: 12px;
+        }
+        .load-btn:hover { opacity: 0.85; }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <h1>Synthetic Trader <span class="version">v0.2.0</span></h1>
+    <h2>Backtest Dashboard — Range Break Strategy</h2>
+    <div id="gate-badge"></div>
+</div>
+
+<button class="load-btn" onclick="document.getElementById('file-input').click()">Cargar reporte JSON</button>
+<input type="file" id="file-input" accept=".json">
+
+<div id="content" style="display:none;">
+
+    <!-- KPIs -->
+    <div class="kpi-grid" id="kpi-grid"></div>
+
+    <!-- Equity Curve + Win/Loss -->
+    <div class="two-cols">
+        <div class="chart-container">
+            <div class="chart-title">Equity Curve</div>
+            <canvas id="equity-chart"></canvas>
+        </div>
+        <div class="chart-container">
+            <div class="chart-title">Distribución de P&L por Trade</div>
+            <canvas id="pnl-chart"></canvas>
+        </div>
+    </div>
+
+    <!-- Config + Circuit Breaker -->
+    <div class="two-cols">
+        <div class="config-panel">
+            <div class="chart-title" style="margin-bottom:12px;">Configuración del Backtest</div>
+            <div class="config-grid" id="config-grid"></div>
+        </div>
+        <div class="config-panel">
+            <div class="chart-title" style="margin-bottom:12px;">Estado Circuit Breaker</div>
+            <div class="config-grid" id="cb-grid"></div>
+        </div>
+    </div>
+
+    <!-- Trades Table -->
+    <div class="trades-table">
+        <table>
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Dir</th>
+                    <th>Entry</th>
+                    <th>Exit</th>
+                    <th>P&L</th>
+                    <th>R</th>
+                    <th>Duration</th>
+                    <th>Exit Reason</th>
+                </tr>
+            </thead>
+            <tbody id="trades-body"></tbody>
+        </table>
+    </div>
+
+</div>
+
+<div id="empty-state" class="empty">
+    <p>Carga un archivo <code>backtest_report.json</code> para ver las métricas.</p>
+    <p style="margin-top:8px; font-size:0.8rem;">Ejecuta <code>python -m src.main backtest</code> para generar el reporte.</p>
+</div>
+
+<script>
+let equityChart = null;
+let pnlChart = null;
+
+document.getElementById('file-input').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const text = await file.text();
+    const data = JSON.parse(text);
+    renderReport(data);
+});
+
+// Auto-load from same directory (for local file:// access)
+fetch('backtest_report.json')
+    .then(r => r.json())
+    .then(data => renderReport(data))
+    .catch(() => {
+        // User needs to manually load
+    });
+
+function renderReport(data) {
+    document.getElementById('content').style.display = 'block';
+    document.getElementById('empty-state').style.display = 'none';
+
+    // Gate badge
+    const gateEl = document.getElementById('gate-badge');
+    if (data.gate_passed) {
+        gateEl.innerHTML = '<span class="gate-badge gate-pass">✓ GATE PASSED</span>';
+    } else {
+        gateEl.innerHTML = '<span class="gate-badge gate-fail">✗ GATE FAILED</span>';
+    }
+
+    // KPIs
+    const kpis = [
+        { label: 'Total Trades', value: data.total_trades, sub: `${data.wins}W / ${data.losses}L` },
+        { label: 'Win Rate', value: `${(data.win_rate * 100).toFixed(1)}%`, sub: data.win_rate > 0.52 ? '✓ > 52%' : '✗ < 52%' },
+        { label: 'Total P&L', value: `$${data.total_pnl.toFixed(2)}`, sub: `Avg: $${data.avg_pnl.toFixed(3)}` },
+        { label: 'Sharpe Ratio', value: data.sharpe_ratio.toFixed(3), sub: data.sharpe_ratio > 1.2 ? '✓ > 1.2' : '✗ < 1.2' },
+        { label: 'Max Drawdown', value: `${(data.max_drawdown * 100).toFixed(2)}%`, sub: data.max_drawdown < 0.12 ? '✓ < 12%' : '✗ > 12%' },
+        { label: 'Profit Factor', value: data.profit_factor.toFixed(3), sub: data.profit_factor > 1 ? 'Profitable' : 'Unprofitable' },
+        { label: 'Expectancy', value: `${data.expectancy.toFixed(3)}R`, sub: data.expectancy > 0.15 ? '✓ > 0.15R' : '✗ < 0.15R' },
+        { label: 'Strategy', value: data.strategy || '—', sub: data.symbol || '—' },
+    ];
+
+    document.getElementById('kpi-grid').innerHTML = kpis.map(k => `
+        <div class="kpi-card">
+            <div class="kpi-label">${k.label}</div>
+            <div class="kpi-value">${k.value}</div>
+            <div class="kpi-sub">${k.sub}</div>
+        </div>
+    `).join('');
+
+    // Equity curve
+    if (equityChart) equityChart.destroy();
+    const ectx = document.getElementById('equity-chart').getContext('2d');
+    equityChart = new Chart(ectx, {
+        type: 'line',
+        data: {
+            labels: data.equity_curve.map((_, i) => i),
+            datasets: [{
+                label: 'Equity',
+                data: data.equity_curve,
+                borderColor: '#4d8dff',
+                backgroundColor: 'rgba(77, 141, 255, 0.08)',
+                fill: true,
+                tension: 0.1,
+                pointRadius: 0,
+                borderWidth: 2,
+            }]
+        },
+        options: {
+            responsive: true,
+            plugins: { legend: { display: false } },
+            scales: {
+                x: { display: false },
+                y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#6b7593' } }
+            }
+        }
+    });
+
+    // P&L distribution
+    if (pnlChart) pnlChart.destroy();
+    const pctx = document.getElementById('pnl-chart').getContext('2d');
+    const pnls = data.trades.map(t => t.pnl);
+    const colors = pnls.map(p => p >= 0 ? 'rgba(0, 214, 143, 0.6)' : 'rgba(255, 77, 109, 0.6)');
+    pnlChart = new Chart(pctx, {
+        type: 'bar',
+        data: {
+            labels: pnls.map((_, i) => `T${i+1}`),
+            datasets: [{
+                label: 'P&L',
+                data: pnls,
+                backgroundColor: colors,
+                borderRadius: 3,
+            }]
+        },
+        options: {
+            responsive: true,
+            plugins: { legend: { display: false } },
+            scales: {
+                x: { grid: { display: false }, ticks: { color: '#6b7593', font: { size: 9 } } },
+                y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#6b7593' } }
+            }
+        }
+    });
+
+    // Config
+    if (data.config) {
+        const configItems = [
+            { label: 'Latency (ms)', value: `${data.config.latency_ms_min}-${data.config.latency_ms_max}` },
+            { label: 'Kelly Dinámico', value: data.config.use_dynamic_kelly ? 'Sí' : 'No' },
+            { label: 'Circuit Breaker', value: data.config.use_circuit_breaker ? 'Sí' : 'No' },
+            { label: 'CB Threshold', value: `${data.config.circuit_breaker_threshold} losses` },
+            { label: 'Daily DD Limit', value: `${(data.config.daily_drawdown_limit * 100).toFixed(0)}%` },
+            { label: 'Kelly Fraction', value: data.config.kelly_fraction },
+        ];
+        document.getElementById('config-grid').innerHTML = configItems.map(c => `
+            <div class="config-item"><span class="label">${c.label}:</span> <span class="value">${c.value}</span></div>
+        `).join('');
+    }
+
+    // Circuit Breaker status
+    if (data.circuit_breaker_status) {
+        const cb = data.circuit_breaker_status;
+        const cbItems = [
+            { label: 'Estado', value: cb.is_halted ? 'HALTED' : 'OK' },
+            { label: 'Pérdidas consec.', value: cb.consecutive_losses },
+            { label: 'Razón', value: cb.halt_reason || '—' },
+            { label: 'Cooldown (min)', value: cb.cooldown_minutes || 0 },
+            { label: 'Halt hasta', value: cb.halt_until ? new Date(cb.halt_until).toLocaleString() : '—' },
+            { label: 'Día', value: cb.today },
+        ];
+        document.getElementById('cb-grid').innerHTML = cbItems.map(c => `
+            <div class="config-item"><span class="label">${c.label}:</span> <span class="value">${c.value}</span></div>
+        `).join('');
+    }
+
+    // Trades table
+    const tbody = document.getElementById('trades-body');
+    tbody.innerHTML = data.trades.map((t, i) => {
+        const dirClass = t.direction === 'LONG' ? 'dir-long' : 'dir-short';
+        const pnlClass = t.pnl >= 0 ? 'pnl-pos' : 'pnl-neg';
+        const reasonBadge = t.exit_reason === 'TP' ? 'badge-tp' : t.exit_reason === 'SL' ? 'badge-sl' : 'badge-time';
+        const duration = `${Math.floor(t.duration / 60)}m ${t.duration % 60}s`;
+        return `<tr>
+            <td style="color:var(--text-dim)">${i + 1}</td>
+            <td class="${dirClass}">${t.direction}</td>
+            <td>${t.entry_price.toFixed(2)}</td>
+            <td>${t.exit_price.toFixed(2)}</td>
+            <td class="${pnlClass}">${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(3)}</td>
+            <td>${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}R</td>
+            <td style="color:var(--text-dim)">${duration}</td>
+            <td><span class="${reasonBadge}">${t.exit_reason}</span></td>
+        </tr>`;
+    }).join('');
+}
+</script>
+
+</body>
+</html>

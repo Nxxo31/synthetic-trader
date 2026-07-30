@@ -8,13 +8,13 @@ version = "0.1.0"
 description = "Algorithmic trading bot for Deriv synthetic indices"
 requires-python = ">=3.11"
 dependencies = [
-    "python-deriv-api>=0.1.1",
     "pandas>=2.2",
     "numpy>=1.26",
     "scipy>=1.12",
     "pyarrow>=15.0",
     "pyyaml>=6.0",
     "websockets>=10.3",
+    "requests>=2.31",
     "aiofiles>=23.2",
     "rich>=13.7",
 ]
@@ -36,4 +36,4 @@ select = ["E", "F", "I", "N", "W", "UP"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+testpaths = ["tests", "src"]

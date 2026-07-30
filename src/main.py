@@ -1,23 +1,40 @@
-"""Main entry point for the Synthetic Trader bot."""
+"""Main entry point for the Synthetic Trader bot.
+
+Modos:
+  backtest  — corre backtest con datos parquet locales, guarda reporte JSON
+  connect   — prueba conexión a Deriv API (PAT + OTP flow)
+  paper     — paper trading en cuenta demo (requiere conexión API)
+
+Usage:
+    python -m src.main backtest    # default
+    python -m src.main connect
+    python -m src.main paper
+"""
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import random
 import sys
 from pathlib import Path
 
+import pyarrow.parquet as pq
 from rich.console import Console
 from rich.logging import RichHandler
+from rich.table import Table
 
 from src.connection.deriv_client import DerivClient, DerivConfig
 from src.data.collector import DataCollector
-from src.strategy.range_break import RangeBreakStrategy, RangeBreakConfig
+from src.strategies.range_break import RangeBreakStrategy, RangeBreakConfig
 from src.backtest.engine import BacktestEngine
 from src.risk.manager import RiskConfig
+from src.analysis.recommender import Recommender
 
 console = Console()
 
-def setup_logging():
+
+def setup_logging() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(message)s",
@@ -25,7 +42,113 @@ def setup_logging():
     )
 
 
-async def test_connection():
+# ---------------------------------------------------------------------------
+# Backtest mode (offline — uses local parquet data)
+# ---------------------------------------------------------------------------
+
+def run_backtest_offline(
+    parquet_path: str = "data/candles/RB100_candles_60s.parquet",
+    initial_capital: float = 10000.0,
+) -> None:
+    """Run backtest with local parquet data — no API connection needed."""
+    console.rule("[bold yellow]Backtest: Range Break Strategy (offline)[/bold yellow]")
+
+    path = Path(parquet_path)
+    if not path.exists():
+        console.print(f"[red]Data file not found: {path}[/red]")
+        console.print("[dim]Run 'python -m src.main connect' first to download data.[/dim]")
+        sys.exit(1)
+
+    console.print(f"[dim]Loading data from {path}...[/dim]")
+    df = pq.read_table(path).to_pandas()
+    console.print(f"[green]✓ Loaded {len(df)} candles[/green]")
+    console.print(f"  Date range: {df['datetime'].iloc[0]} → {df['datetime'].iloc[-1]}")
+    console.print(f"  Price range: {df['low'].min():.2f} → {df['high'].max():.2f}")
+
+    # Set random seed for reproducible latency simulation
+    random.seed(42)
+
+    strategy = RangeBreakStrategy(symbol="RB100", config=RangeBreakConfig())
+    risk_config = RiskConfig()
+    engine = BacktestEngine(
+        strategy,
+        risk_config,
+        latency_ms_min=100,
+        latency_ms_max=500,
+        use_dynamic_kelly=True,
+        use_circuit_breaker=True,
+    )
+
+    result = engine.run(df, initial_capital=initial_capital)
+
+    # Print summary
+    console.print(result.summary())
+
+    # Gate evaluation
+    if result.gate_passed:
+        console.print("[bold green]✓ GATE PASSED — Strategy ready for paper trading[/bold green]")
+    else:
+        console.print("[bold red]✗ GATE FAILED — Strategy needs adjustment[/bold red]")
+        for failure in result.gate_failures:
+            console.print(f"  [red]• {failure}[/red]")
+
+    # Print trades table
+    if result.trades:
+        table = Table(title="Trades", show_lines=False)
+        table.add_column("#", style="dim")
+        table.add_column("Dir", style="cyan")
+        table.add_column("Entry", justify="right")
+        table.add_column("Exit", justify="right")
+        table.add_column("P&L", justify="right")
+        table.add_column("R", justify="right")
+        table.add_column("Reason", style="yellow")
+
+        for idx, t in enumerate(result.trades[:20]):  # Show first 20
+            pnl_color = "green" if t.pnl >= 0 else "red"
+            table.add_row(
+                str(idx + 1),
+                t.direction,
+                f"{t.entry_price:.2f}",
+                f"{t.exit_price:.2f}",
+                f"[{pnl_color}]${t.pnl:.2f}[/{pnl_color}]",
+                f"{t.pnl_pct:.2f}",
+                t.exit_reason,
+            )
+        if len(result.trades) > 20:
+            table.add_row("...", "...", "...", "...", "...", "...", f"+{len(result.trades) - 20} more")
+        console.print(table)
+
+    # Save report JSON
+    report_path = Path("reports/backtest")
+    report_path.mkdir(parents=True, exist_ok=True)
+
+    report = result.to_dict()
+    report["strategy"] = "RangeBreak"
+    report["symbol"] = "RB100"
+    report["config"] = {
+        "latency_ms_min": 100,
+        "latency_ms_max": 500,
+        "use_dynamic_kelly": True,
+        "use_circuit_breaker": True,
+        "circuit_breaker_threshold": 3,
+        "daily_drawdown_limit": risk_config.max_daily_drawdown,
+        "kelly_fraction": risk_config.kelly_fraction,
+    }
+    report["circuit_breaker_status"] = (
+        engine.circuit_breaker.status() if engine.circuit_breaker else None
+    )
+
+    report_file = report_path / "backtest_report.json"
+    with open(report_file, "w") as f:
+        json.dump(report, f, indent=2, default=str)
+    console.print(f"\n[green]Report saved to {report_file}[/green]")
+
+
+# ---------------------------------------------------------------------------
+# Connection test mode
+# ---------------------------------------------------------------------------
+
+async def test_connection() -> DerivClient:
     """Test connection to Deriv API and verify credentials."""
     config = DerivConfig.from_yaml()
     client = DerivClient(config)
@@ -34,22 +157,20 @@ async def test_connection():
 
     try:
         await client.connect()
-        console.print("[green]✓ Connected to Deriv WebSocket[/green]")
+        console.print("[green]✓ Connected to Deriv WebSocket (new API)[/green]")
+        console.print(f"  Account: {client.config.account_id} ({'demo' if client.config.is_demo else 'real'})")
+        console.print("[green]✓ Authorized via OTP[/green]")
 
-        if client.is_authorized:
-            console.print("[green]✓ Authorized (demo account)[/green]")
-            balance = await client.balance()
-            console.print(f"  Balance: {balance.get('balance', {}).get('balance', '?')} "
-                          f"{balance.get('balance', {}).get('currency', '?')}")
-        else:
-            console.print("[yellow]⚠ Not authorized (market data only mode)[/yellow]")
-            console.print("  Set DERIV_API_TOKEN in .env for trading features")
+        balance = await client.balance()
+        console.print(
+            f"  Balance: {balance.get('balance', {}).get('balance', '?')} "
+            f"{balance.get('balance', {}).get('currency', '?')}"
+        )
 
         symbols = await client.active_symbols()
         active = symbols.get("active_symbols", [])
         console.print(f"[green]✓ {len(active)} active symbols available[/green]")
 
-        # Show Range Break symbols if available
         rb_symbols = [s for s in active if "RANGE" in s.get("display_name", "").upper()]
         if rb_symbols:
             console.print(f"[cyan]  Range Break symbols found: {len(rb_symbols)}[/cyan]")
@@ -63,7 +184,7 @@ async def test_connection():
         raise
 
 
-async def download_data(client: DerivClient, symbol: str = "R_100"):
+async def download_data(client: DerivClient, symbol: str = "R_100") -> None:
     """Download historical candle data for backtesting."""
     collector = DataCollector(client)
     console.rule(f"[bold blue]Downloading data for {symbol}[/bold blue]")
@@ -71,77 +192,45 @@ async def download_data(client: DerivClient, symbol: str = "R_100"):
     df = await collector.download_candles(symbol=symbol, count=5000, granularity=60)
     console.print(f"[green]✓ Downloaded {len(df)} candles[/green]")
     console.print(f"  Date range: {df['datetime'].iloc[0]} → {df['datetime'].iloc[-1]}")
-    console.print(f"  Price range: {df['low'].min():.4f} → {df['high'].max():.4f}")
-
-    return df
 
 
-async def run_backtest(data):
-    """Run backtest with Range Break strategy."""
-    console.rule("[bold yellow]Backtest: Range Break Strategy[/bold yellow]")
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
-    strategy = RangeBreakStrategy(symbol="R_100", config=RangeBreakConfig())
-    risk_config = RiskConfig()
-    engine = BacktestEngine(strategy, risk_config)
-
-    result = engine.run(data, initial_capital=10000.0)
-
-    console.print(result.summary())
-
-    if result.gate_passed:
-        console.print("[bold green]✓ GATE PASSED — Strategy ready for paper trading[/bold green]")
-    else:
-        console.print("[bold red]✗ GATE FAILED — Strategy needs adjustment[/bold red]")
-        for failure in result.gate_failures:
-            console.print(f"  [red]• {failure}[/red]")
-
-    return result
-
-
-async def main():
+async def main() -> None:
     """Main bot entry point."""
     setup_logging()
 
-    console.rule("[bold magenta]Synthetic Trader — Deriv Bot v0.1.0[/bold magenta]")
-    console.print("[dim]Phase 1: Strategy Design + Backtest[/dim]")
-    console.print("[dim]Mode: Paper Trading (demo account only)[/dim]")
+    mode = sys.argv[1] if len(sys.argv) > 1 else "backtest"
+
+    console.rule("[bold magenta]Synthetic Trader — Deriv Bot v0.2.0[/bold magenta]")
+    console.print(f"[dim]Mode: {mode.upper()}[/dim]")
+    console.print(f"[dim]Strategy: Range Break (multi-factor scoring + Kelly dinámico + circuit breaker dual)[/dim]")
     console.print()
 
     try:
-        # Step 1: Connect to Deriv
-        client = await test_connection()
+        if mode == "backtest":
+            run_backtest_offline()
 
-        # Step 2: Download historical data
-        # Using R_100 as proxy for initial testing (Range Break symbol may differ)
-        data = await download_data(client, symbol="R_100")
+        elif mode == "connect":
+            client = await test_connection()
+            await download_data(client, symbol="R_100")
+            await client.disconnect()
+            console.print("\n[green]Done. Bot disconnected.[/green]")
 
-        # Step 3: Run backtest
-        if not data.empty:
-            result = await run_backtest(data)
+        elif mode == "paper":
+            from src.trading.paper_runner import run_paper_trading
+            console.print("[yellow]Starting paper trading on Deriv demo account...[/yellow]")
+            console.print(f"[dim]Symbol: RB100 | Max trades: 30 | Score threshold: 0.50[/dim]")
+            console.print("[bold red]Paper trading ONLY — no real money at risk.[/bold red]")
+            console.print()
+            await run_paper_trading(symbol="RB100", max_trades=30)
 
-            # Save report
-            report_path = Path("reports/backtest")
-            report_path.mkdir(parents=True, exist_ok=True)
-
-            import json
-            report = {
-                "strategy": "RangeBreak",
-                "symbol": "R_100",
-                "trades": result.total_trades,
-                "win_rate": result.win_rate,
-                "sharpe": result.sharpe_ratio,
-                "max_drawdown": result.max_drawdown,
-                "gate_passed": result.gate_passed,
-                "gate_failures": result.gate_failures,
-            }
-            with open(report_path / "backtest_report.json", "w") as f:
-                json.dump(report, f, indent=2)
-            console.print(f"\n[green]Report saved to {report_path / 'backtest_report.json'}[/green]")
         else:
-            console.print("[red]No data downloaded — cannot run backtest[/red]")
-
-        await client.disconnect()
-        console.print("\n[green]Done. Bot disconnected.[/green]")
+            console.print(f"[red]Unknown mode: {mode}[/red]")
+            console.print("[dim]Usage: python -m src.main [backtest|connect|paper][/dim]")
+            sys.exit(1)
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted by user[/yellow]")
