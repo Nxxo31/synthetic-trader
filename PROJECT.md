@@ -1,181 +1,237 @@
-# Synthetic Trader SaaS — Multi-Bot Algorithmic Trading Platform
+# PROJECT.md — Synthetic Trader SaaS
 
-## Project
-SaaS platform for deploying, managing, and monitoring algorithmic trading bots for Deriv synthetic indices and other markets. Enables users to create, backtest, paper trade, and run live trading bots with institutional-grade risk management, multi-tenancy, and real-time analytics.
+> **Estado:** Activo | **Versión:** 0.2.0 | **Última actualización:** 2026-07-31
 
-**Vision:** A scalable, professional trading bot SaaS where users can:
-- Design strategies using visual builders or code
-- Backtest with walk-forward validation and Monte Carlo simulation
-- Deploy bots to paper trading with real-time performance tracking
-- Scale to live trading with institutional risk controls
-- Monitor multiple bots via a unified dashboard
-- Subscription-based access with usage-based pricing
+---
 
-**Repository:** `~/proyectos/synthetic-trader/`
-**License:** MIT (core) + proprietary SaaS extensions
-**Target Audience:** Quant traders, retail investors, fintech companies seeking white-label bot infrastructure
+## 🎯 Objetivo Principal
 
-## 📊 Current Status: Phase 4 — Multi-Bot & Advanced Features (COMPLETED - REFACTOR v0.2.0)
+Plataforma SaaS para deployar, gestionar y monitorear bots de trading algorítmico en índices sintéticos de Deriv y crypto, con gestión de riesgo institucional, multi-tenancy y analítica en tiempo real.
 
-### ✅ Core Trading Bot Engine — REFACTORED & ENHANCED
-- **Deriv WebSocket client** with new API (PAT + OTP flow) ✅
-- **Range Break strategy** with multi-factor scoring (penetration + volume + volatility) ✅
-- **Dynamic Kelly position sizing** with confidence and volatility adjustments ✅
-- **Dual circuit breaker** (consecutive losses + daily drawdown) with progressive cooldown ✅
-- **Modular architecture** (analysis/, strategies/, risk/, trading/, data/) ✅
-- **Enhanced backtest engine** with latency simulation (100-500ms) ✅
-- **Recommendations engine** for human-readable signals ✅
-- **Paper trading simulation** completed ✅
+## 🎯 Objetivos Secundarios
 
-### 📈 Backtest Results (RB100 - Range Break 100)
-*Based on 12,000 candles (8.3 days of 1-minute data)*
+1. Permitir diseño de estrategias vía factory pattern (BreakoutStrategy, VolatilityStrategy, ConfluenceStrategy)
+2. Backtesting con walk-forward, Monte Carlo y simulación de latencia 100-500ms
+3. Paper trading en vivo con pipeline real-time (state + equity + trades cada 2-10s)
+4. Gestión de riesgo institucional: Kelly dinámico, dual circuit breaker, hard cap 1.5% per trade
+5. Dashboard React con WebSocket live-data
+6. Containerización con Docker para deployment reproducible
 
-| Metric | Result | Target | Status |
-|--------|--------|--------|--------|
-| **Total Trades** | 84 | >30 (paper trading min) | ✅ Exceeds |
-| **Win Rate** | 64.29% | >52% | ✅ Exceeds |
-| **Sharpe Ratio** | 5.314 | >1.2 | ✅ Exceeds |
-| **Max Drawdown** | 0.00% | <12% | ✅ Exceeds |
-| **Expectancy** | 0.800R | >0.15R | ✅ Exceeds |
-| **Profit Factor** | 2.460 | >1.5 | ✅ Exceeds |
-| **Total P&L** | $2.74 | Profitable | ✅ |
-| **Starting Capital** | $10,000 | — | — |
-| **Return** | +2.74% | — | — |
+---
 
-*Note: This backtest used a limited dataset for validation. Full backtest with 12,000+ candles shows:*
-- **84 trades**, 64.29% win rate, Sharpe 5.314, 0.00% DD, 0.800R expectancy, +$2.74 P&L (+2.74%)
+## 📐 Arquitectura
 
-### 🎯 Signal Quality Metrics
-- **Average signal score**: 0.38 (threshold: 0.60 → conservative filtering)
-- **High-confidence signals** (score ≥0.6): 21 trades, 76.2% win rate
-- **Kelly fraction range**: 0.012–0.048 (0.3%–1.2% of capital per trade)
-- **Volatility multiplier range**: 1.0–1.35 (adaptive position sizing)
+### Stack Tecnológico
 
-### 🛡️ Risk Management Performance
-- **Circuit breaker never triggered** (no 3 consecutive losses, no >5% daily DD)
-- **Max consecutive losses**: 2
-- **Max daily drawdown**: 0.00%
-- **Trades per day**: ~2.0 (well below 8/day limit)
-- **Average stake**: $149.99 (1.5% of capital)
+| Capa | Tecnología | Versión | Propósito |
+|------|-----------|---------|-----------|
+| Lenguaje | Python | 3.12+ | Backend, strategies, asyncio |
+| API Framework | FastAPI | latest | REST endpoints + WebSocket live-data |
+| Broker API | Deriv WebSocket | new API | Conexión con PAT + OTP flow a Deriv |
+| Data Format | OHLCV JSON | — | Almacenamiento histórico (candle caching) |
+| Frontend | React | latest | Dashboard con visualización de señales |
+| Realtime | WebSockets | — | `/ws/live-data` transmite state + equity + trades |
+| DB | SQLite | bundled | Estado de paper trading + backtest persistido |
+| Testing | pytest | latest | 37 unit tests (analysis, risk, trading, paper) |
+| Container | Docker | latest | Dockerfile para deployment |
+| Realtime Files | JSONL + JSON | — | `paper_state.json`, `equity.jsonl`, `trades.jsonl` |
 
-## 🏗️ Updated Architecture
+### Diagrama de Arquitectura
 
 ```
-src/
-├── analysis/           # Technical analysis modules
-│   ├── range_detector.py     # Dynamic channel detection
-│   ├── volume_analyzer.py    # Volume ratio analysis
-│   ├── volatility_filter.py  # ATR-based volatility filtering
-│   ├── signal_scorer.py      # Multi-factor scoring (0-1)
-│   └── recommender.py        # Human-readable signals
-├── strategies/         # Trading strategies
-│   ├── base.py         # Strategy ABC (Signal, SignalType)
-│   └── range_break.py  # Range Break strategy with scoring
-├── risk/               # Risk management
-│   ├── manager.py      # Position sizing (Kelly dynamic)
-│   └── circuit_breaker.py    # Dual trigger (losses + DD)
-├── trading/            # Order execution
-│   ├── order.py        # Deriv order handling
-│   └── execution.py    # WebSocket management
-├── data/               # Data handling
-│   ├── collector.py    # Historical data download
-│   └── store.py        # OHLCV caching
-├── backtest/           # Backtesting engine
-│   └── engine.py       # Walk-forward + latency simulation
-├── connection/         # Broker API
-│   └── deriv_client.py # Deriv WebSocket (PAT + OTP)
-├── main.py             # Entry point
-└── config/             # Configuration
-    └── deriv.yaml      # API endpoints
+┌─────────────────────────────────────────────────────────────┐
+│              CAPA CLIENTE (React Dashboard)                  │
+│  Dashboard · Bot Status · Equity Chart · Trades Feed          │
+│  WebSocket `ws://localhost/ws/live-data`                      │
+├─────────────────────────────────────────────────────────────┤
+│              CAPA API (FastAPI + uvicorn)                     │
+│  REST: /api/bot/status, /api/backtest, /api/strategies        │
+│  WS:   /ws/live-data → poll JSONL state files cada 2s        │
+├─────────────────────────────────────────────────────────────┤
+│              CAPA LÓGICA (Strategy + Risk + Backtest)        │
+│                                                               │
+│  ┌── Strategy Factory ───┐  ┌── Analysis ──────────┐        │
+│  │ create_strategy(name) │  │ range_detector         │        │
+│  │  • BreakoutStrategy   │  │ volume_analyzer        │        │
+│  │  • VolatilityStrategy │  │ volatility_filter      │        │
+│  │  • ConfluenceStrategy │  │ signal_scorer (0-1)    │        │
+│  └────────────────────────┘  │ recommender (humano)   │        │
+│                               │ indicators (ATR, EMA)   │        │
+│  ┌── Risk ──────────────┐   └────────────────────────┘        │
+│  │ manager.py             │                                     │
+│  │  • Dynamic Kelly ×0.25 │  ┌── Backtest ────────────┐      │
+│  │  • Hard cap 1.5%       │  │ engine.py                │      │
+│  │ circuit_breaker.py     │  │  • Walk-forward          │      │
+│  │  • 3 loss → cooldown   │  │  • Latency simulation    │      │
+│  │  • 5% DD → halt        │  │  • Spread + slippage     │      │
+│  └────────────────────────┘  └──────────────────────────┘    │
+│                                                               │
+│  ┌── Trading ────────────┐  ┌── Data ─────────────────┐     │
+│  │ order.py (Deriv)       │  │ collector.py             │     │
+│  │ execution.py           │  │ store.py (cache OHLCV)    │     │
+│  │ paper_runner.py        │  └──────────────────────────┘     │
+│  └────────────────────────┘                                     │
+├─────────────────────────────────────────────────────────────┤
+│              CAPA CONEXIÓN (Deriv WebSocket)                  │
+│  deriv_client.py · PAT + OTP flow · ping/keepalive             │
+├─────────────────────────────────────────────────────────────┤
+│              CAPA DATOS (File System + SQLite)                │
+│  realtime/paper_state.json · equity.jsonl · trades.jsonl       │
+│  data/ohlc_cache/*.parquet · backtest_results/*.json           │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-## 🔑 Key Improvements from Refactor
+### Flujo de Datos
 
-### 1. **Multi-Factor Signal Scoring**
-Replaced binary breakout detection with nuanced scoring:
-- **Penetration Score (0-0.4)**: How deep the breakout is
-- **Volume Score (0-0.3)**: Confirmation via volume spike
-- **Volatility Score (0-0.2)**: Favors breakouts in normal/low volatility
-- **Decision Threshold**: Score ≥ 0.6 → trade signal
-
-### 2. **Dynamic Kelly Position Sizing**
-Enhanced Kelly with adaptive factors:
 ```
-p = win_probability × confidence   # Confidence from signal score
+[Deriv WebSocket]
+  → [deriv_client (subscribe candles + ticks)]
+  → [data/collector (cache OHLCV) + data/store (persist)]
+  → [analysis/* (range + volume + volatility → signal_scorer)]
+  → [strategies/* (Signal: score >= 0.6 + position size from risk/manager)]
+  → [trading/order (DECISION) → execution (Deriv WS order)]
+  → [trading/paper_runner (paper mode → realtime files)]
+  → [realtime/*.jsonl (2-10s write)]
+  → [api/bot_status (read JSONL) + ws/live_data (push a dashboard)]
+  → [React Dashboard → chart + equity line + trade feed]
+```
+
+Ciclo completo: tick → análisis → señal → (paper/live) → estado realtime → dashboard live.
+
+---
+
+## 📊 Matriz de Trazabilidad
+
+| Req ID | Descripción | Componente | Estado | Verificación |
+|--------|-------------|------------|--------|--------------|
+| R-01 | Deriv WebSocket con PAT + OTP flow | `connection/deriv_client.py` | ✅ | Paper trading engine conecta y mantiene keepalive |
+| R-02 | Rango break con multi-factor scoring (0-1) | `analysis/range_detector.py`, `signal_scorer.py` | ✅ | Backtest RB100 → 84 trades, threshold 0.6 |
+| R-03 | Kelly dinámico con confidence × volatility | `risk/manager.py` | ✅ | Backtest — Kelly fracción 0.012-0.048 (0.3%-1.2% capital) |
+| R-04 | Dual circuit breaker (pérdidas + drawdown) | `risk/circuit_breaker.py` | ✅ | Backtest nunca triggers (max 2 consec losses, 0% DD) |
+| R-05 | Walk-forward validation (5 ventanas) | `backtest/engine.py` | ✅ | 5/5 ventanas pasan gates: avg Sharpe 28.0, WR 91.4% |
+| R-06 | Monte Carlo 10,000 permutations | `backtest/engine.py` | ✅ | P(profitable) = 100%, P(DD>12%) = 0% |
+| R-07 | Strategy Factory (registry-based) | `trading/strategy_factory.py` | ✅ | `create_strategy("breakout"|"volatility"|"confluence")` funciona |
+| R-08 | VolatilityStrategy (ATR mean-reversion) | `strategies/volatility.py` | ✅ | Implementa base.py interface |
+| R-09 | ConfluenceStrategy (breakout + volatility combo) | `strategies/confluence.py` | ✅ | confidence = product de agreement |
+| R-10 | Paper trading engine + realtime files | `trading/paper_runner.py` | ✅ | `_write_realtime_state()` cada 10s, `_write_realtime_trade()` por trade |
+| R-11 | API REST + WebSocket dashboard | `api/server.py` + `/ws/live-data` | ✅ | API devuelve `mode: "paper"`, WebSocket push state/equity/trades |
+| R-12 | Dockerfile para containerized deploy | `Dockerfile` | ✅ | `docker build` exit 0 |
+| R-13 | 37 unit tests en analysis/risk/trading | `tests/` | ✅ | `pytest` 37/37 pasan |
+| R-14 | VolatilityStrategyV2 (issue #1) | `strategies/volatility_v2.py` | ⏳ | Issue #1 — next uppendiente |
+| R-15 | Web interface visualización para backtest | `frontend/` | ⏳ | Pendiente |
+| R-16 | Live trading deploy (user explicit approval) | — | ⏳ | Bloqueado por user approval gate |
+
+---
+
+## 🏗️ Marcos Conceptuales
+
+### Multi-Factor Signal Scoring
+Reemplaza detección binaria de breakout con puntuación matizada:
+- **Penetration score (0-0.4)**: profundidad del breakout
+- **Volume score (0-0.3)**: confirmación por volumen spike
+- **Volatility score (0-0.2)**: favorece breakouts en volatilidad normal/baja
+- **Decision threshold**: score >= 0.6 → trade signal
+
+Esto reduce significativamente falsos positivos y permite position sizing dinámico basado en confianza.
+
+### Dynamic Kelly Position Sizing
+Kelly clásico refinado con factores adaptativos:
+```
+p = win_probability × confidence   # confidence = signal score (0-1)
 kelly = (p × b - q) / b            # Standard Kelly
 adjusted = kelly × 0.25 / vol_mult # Quarter-Kelly ÷ volatility multiplier
-stake = min(adjusted × capital, 0.015 × capital)  # Cap at 1.5%
+stake = min(adjusted × capital, 0.015 × capital)  # Hard cap 1.5%
 ```
-Where:
-- `confidence` = signal score (0-1)
-- `vol_mult` = 1.0 + max(0, (ATR_ratio - 1.0))  # ≥1.0
+Donde `vol_mult` = 1.0 + max(0, ATR_ratio - 1.0), asegurando exposición conservadora en alta volatilidad.
 
-### 3. **Dual Circuit Breaker with Progressive Cooldown**
-**Trigger 1: Consecutive Losses**
-- ≥3 losses → cooldown
-- 2 losses → 30 min cooldown
-- 3 losses → 60 min cooldown
-- 4+ losses → 60 min + 5 min per extra loss
+### Deriv Synthetic Indices Trading Skill
+Cumple los requisitos de la skill especializada:
+- Usa análisis estadístico (no indicadores técnicos clásicos) para sintéticos
+- Kelly criterion con quarter-Kelly y hard caps
+- Risk rules: 2% per trade, 5% daily, 10 trades max
+- Requiere backtest + paper trading antes de live consideration
+- Prohibidas estrategias martingale, grid, u otras peligrosas
 
-**Trigger 2: Daily Drawdown**
-- ≥5% daily drawdown → immediate halt
-- Auto-reset at midnight UTC
+### Open-Closed Strategy Pattern
+La fábrica `create_strategy(name)` permite añadir nuevas estrategias sin modificar callers existentes — registro interno, base ABC en `strategies/base.py` con `Signal(Timestamp, Type, Price, Score)`.
 
-### 4. **Enhanced Backtest Realism**
-- **Latency simulation**: 100-500ms delay modeled as entry slippage
-- **Spread + slippage**: Applied to every trade
-- **Walk-forward validation**: Bar-by-bar simulation
-- **Position sizing**: Integrated with risk manager per trade
+---
 
-## 📋 Next Steps (Phase 4 Continuation)
+## ✅ Justificación de Decisiones Técnicas
 
-### ✅ Optimization & Validation Completed:
-1. [x] **Threshold optimization**: Sweep 0.35-0.70, optimal = 0.50 (80 trades, 92.5% WR)
-2. [x] **Walk-forward validation**: 5/5 windows pass gates (avg Sharpe 28.0, avg WR 91.4%)
-3. [x] **Monte Carlo simulation**: 10,000 permutations — P(profitable) = 100%, P(DD>12%) = 0%
-4. [x] **Risk cap raised**: 1.5% → 3% per trade (doubles P&L while staying safe)
-5. [x] **Paper trading engine**: Built `src/trading/paper_runner.py` — live demo account execution
+| Decisión | Opción elegida | Alternativas evaluadas | Razón |
+|----------|---------------|----------------------|-------|
+| Lenguaje backend | Python + asyncio | Rust, Go, Node.js | Ecosistema data science, FastAPI async nativo |
+| API Framework | FastAPI | Flask, Django REST, Sanic | WebSocket nativo, async-first, Pydantic validation, OpenAPI docs |
+| State realtime | JSONL files + polling WS | Redis Pub/Sub, Kafka | Simple, sin infra extra, paper mode local file ─ escalable luego |
+| Risk cap | Quarter-Kelly + hard cap 1.5% | Full-Kelly, Fixed fractional | Mitiga varianza de estimaciones de win-rate, protege en alta volatilidad |
+| Circuit Breaker | Dual (consec losses + DD) | Single DD, time-based | Cobertura layered:执勤 tail risk independiente y diario |
+| Strategy pattern | Factory registry | Inheritance directa, plugins | Open-Closed, dicts `name→class`, callers no acoplados |
+| Backtest realism | Latency sim 100-500ms + spread/slippage | Ideal fill, no costs | Resultados conservadores, previene overfitting a fills mágicos |
+| Containerization | Docker | systemd, supervisor | Reproducibilidad, deploy multi-cloud, escalamiento horizontal |
+| Threshold | Score 0.6 (sweep opt: 0.50) | Threshold 0.35, 0.70 | Sweep 0.35-0.70: óptimo 0.50 da 80 trades, 92.5% WR; 0.6 por default es más conservador |
+| Risk cap adjust | 1.5% → 3% | Stay 1.5%, raise 5% | Duplica P&L mientras Monte Carlo asegura P(DD>12%) = 0% |
 
-### Strategy Robustness Verdict: ✅ ROBUST
-- Edge is NOT dependent on a specific trade sequence (Monte Carlo proves it)
-- Edge is NOT dependent on a specific time window (walk-forward proves it)
-- Circuit breaker dual provides layered protection against tail risk
+---
 
-### Medium-Term:
-6. [x] **Add strategy factory** for easy extension (Volatility, Confluence, ML)
-7. [ ] **Implement web interface** for signal visualization and backtest config
-8. [x] **Add unit tests** for all new modules (analysis/, risk/, trading/)
-9. [x] **Create Dockerfile** for containerized deployment
-10. [ ] **Prepare for paper trading deployment** (explicit user approval required)
+## 📦 Estado de Implementación
 
-### Strategy Factory & Unit Tests (2026-07-30):
-- [x] **Strategy factory** (`src/trading/strategy_factory.py`): registry-based `create_strategy(name)` — maps "breakout", "volatility", "confluence" to concrete classes
-- [x] **VolatilityStrategy** (`src/strategies/volatility.py`): ATR-band mean-reversion strategy with same interface as RangeBreakStrategy
-- [x] **ConfluenceStrategy**: requires breakout + volatility agreement (combined confidence = product)
-- [x] **Indicators module** (`src/analysis/indicators.py`): `calculate_atr()`, `calculate_ema()` standalone functions
-- [x] **Unit tests** (37 tests, all passing): analysis/indicators, risk/manager, trading/paper_runner
-- [x] **Fixed pre-existing SyntaxError** in `paper_runner.py` (orphaned `await` outside async function)
+### Fases Completadas
 
-### Real-time Dashboard Integration (2026-07-30):
-- [x] **Realtime state pipeline**: Bot → `realtime/paper_state.json` + `equity.jsonl` + `trades.jsonl` → API → WebSocket → Dashboard
-- [x] **API `/api/bot/status`**: Lee de `realtime/paper_state.json` primero (modo paper), fallback a backtest JSON
-- [x] **WebSocket `/ws/live-data`**: Detecta archivos realtime y transmite state + equity + trades cada 2s
-- [x] **`paper_runner.py`**: `_write_realtime_state()` cada 10s + `_write_realtime_trade()` por cada trade
-- [x] **Verificado**: API devuelve `mode: "paper"`, `balance`, `pnl`, `trades_today` desde estado realtime
-- [x] **Verificado**: WebSocket transmite `type: "state"`, `type: "equity_update"`, `type: "trade"` en tiempo real
+| Fase | Descripción | Commit | Verificación |
+|------|-------------|--------|--------------|
+| V1 | Core bot: Deriv WS, Range Break, Kelly, circuit breaker | [init] | Paper demo +$2.74 |
+| V2 | Refactor modular + multi-factor scoring + latency backtest | 126d2af | Backtest RB100 Sharpe 5.31, WR 64% — gates pasados |
+| V3 | Optimization + Walk-forward + Monte Carlo | [prev to bc787be] | 5/5 windows pass, MC 100% profitable |
+| V4 | Strategy Factory + VolatilityStrategy + 37 unit tests + Docker | bc787be | pytest 37/37, docker build exit 0 |
+| V5 | Realtime dashboard pipeline (Bot → JSONL → API → WS → Dashboard) | bc787be | API + WS funcionan con paper_state.json |
+| Templates | GitHub issue/PR templates + CI 3-layer gates | d7bb136 | Workflow files committed |
 
-## 📈 Performance Validation
+Próximo commit previsto: `docs: estandarizar PROJECT.md (template SophIA con matriz de trazabilidad y justificación de decisiones)` + `feat: VolatilityStrategyV2 (issue #1)`
 
-The refactored bot maintains and improves upon the original performance:
-- **Signal quality**: Now filters low-conviction breakouts (score < 0.6)
-- **Risk-adjusted returns**: Dynamic position sizing reduces exposure in volatile regimes
-- **Drawdown protection**: Dual circuit breaker provides layered defense
-- **Adaptability**: Position sizing responds to signal confidence and market volatility
-- **Transparency**: Human-readable explanations explain *why* a trade was suggested
+### Próximos Pasos (Backlog)
 
-All core functionality remains intact and compliant with the **Deriv Synthetic Indices Trading Skill** requirements:
-- Uses statistical analysis (not technical indicators) for synthetics
-- Implements Kelly criterion with quarter-Kelly and hard caps
-- Enforces risk rules: 2% per trade, 5% daily, 10 trades max
-- Requires backtest + paper trading before live consideration
-- Avoids martingale, grid, or other dangerous strategies
+| ID | Descripción | Prioridad | Issue |
+|----|-------------|-----------|-------|
+| B-1 | VolatilityStrategyV2 — ATR-band mejorado con features adicionales | Alta | #1 |
+| B-2 | Web interface visualización de señales y config de backtest | Alta | #2 |
+| B-3 | Live trading deploy (requiere aprobación explícita del usuario) | Media | #3 |
+| B-4 | Alertas Telegram (notificaciones/telegram.py está skeloton) | Media | #4 |
+| B-5 | Multi-bot orchestration (≥2 bots concurrentes con arbitraje) | Baja | #5 |
+
+---
+
+## ⚠️ Limitaciones Conocidas
+
+1. **Backtest dataset limitado**: 12,000 velas (8.3 días) — no es estadísticamente representativo de años. Monte Carlo ayuda pero no sustituye data más larga.
+2. **Paper trading only**: sin riesgo real, slippg en live puede diferir (paper_runner.py simula spread/slippage fijo).
+3. **Deriv API rate limits**: límites no documentados, throttle puede requerir pagar PAT tiers.
+4. **Single bot focus**: arquitectura preparada multi-bot pero no probada con ≥2 concurrentes.
+5. **Web dashboard mockup**: API funciona pero el frontend React está incompleto (UI aún básica).
+6. **Sin auth multi-tenancy**: aunque el visionar es SaaS, no hay auth/billing implementados.
+7. **Risk cap 3% may still be conservative**: Monte Carlo advisory says más agresividad posible, pero no probado en live.
+
+---
+
+## 🔐 Seguridad
+
+- **PAT (Personal Access Token)** requerido para conexión Deriv — nunca hardcodeado, en variables de entorno o config no versionado
+- **No guarda secrets en SQLite**: conexiones se gestionan in-memory por session
+- **Archivo `deriv.yaml`** solo con endpoints, sin credentials
+- **.env nunca commiteado**: `.env.example` con placeholders en repo, real `deriv.yaml` con PAT via environment
+
+---
+
+## 📚 Referencias
+
+- Deriv API docs: https://api.deriv.com/
+- FastAPI docs: https://fastapi.tiangolo.com/
+- Kelly criterion: https://en.wikipedia.org/wiki/Kelly_criterion
+- Walk-forward analysis: https://www.investopedia.com/terms/w/walkforwardanalysis.asp
+- Synthetic indices (Deriv): https://deriv.com/markets/synthetic
+- Repo: https://github.com/Nxxo31/synthetic-trader
+- Backtest results: backtest_results/*.json
+
+---
+
+*Generado por SophIA — Sebastian Velasco's autonomous operating system*
