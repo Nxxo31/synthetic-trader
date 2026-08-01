@@ -7,6 +7,7 @@ Endpoints:
     GET  /api/bot/status               — estado del bot (risk, circuit breaker, balance)
     GET  /api/bot/trades               — historial de trades
     GET  /api/market/symbols           — símbolos disponibles
+    GET  /api/strategies               — estrategias registradas (factory)
     GET  /api/daily/report             — reporte diario más reciente
     GET  /api/daily/history            — historial de reportes diarios
     WS   /ws/live-data                 — stream en tiempo real (equity, trades, risk)
@@ -19,13 +20,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Synthetic Trader API",
@@ -222,6 +229,21 @@ async def get_market_symbols() -> list:
     ]
 
 
+@app.get("/api/strategies")
+async def list_strategies() -> dict:
+    """Lista las estrategias disponibles registradas en el factory.
+
+    Usa ``available_strategies()`` del strategy_factory, así cualquier
+    estrategia registrada (incluida Gems) aparece automáticamente.
+    """
+    from src.trading.strategy_factory import available_strategies
+
+    return {
+        "strategies": available_strategies(),
+        "count": len(available_strategies()),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Daily reports
 # ---------------------------------------------------------------------------
@@ -373,6 +395,112 @@ async def websocket_live_data(websocket: WebSocket) -> None:
         print(f"WebSocket error: {e}")
     finally:
         await websocket.close()
+# ---------------------------------------------------------------------------
+# Strategy DB endpoints — backed by the Strategy Histórica DB (SQLite)
+#
+# Coexists with the factory-based GET /api/strategies above. The DB-backed
+# routes manage strategy *versions* (semantic versioning, lineage, rollback),
+# while the factory route lists the *implementations* registered in code.
+# To avoid colliding with the existing GET /api/strategies handler, the DB
+# create endpoint reuses that path with a POST verb. The compare endpoint is
+# declared before the parametric {strategy_id} route so FastAPI matches the
+# literal path first.
+# ---------------------------------------------------------------------------
+
+
+class StrategyCreate(BaseModel):
+    """Request body for POST /api/strategies."""
+
+    name: str
+    version: str
+    description: str | None = None
+    parameters: dict[str, Any] | None = None
+    lineage_parent_id: int | None = None
+    market_type: str = "synthetic"
+    status: str = "active"
+
+
+def _strategy_service() -> Any:
+    """Build a fresh StrategyService per request (cheap, short-lived conn)."""
+    from src.db.service import StrategyService
+
+    return StrategyService()
+
+
+@app.post("/api/strategies")
+async def create_strategy(payload: StrategyCreate) -> dict[str, Any]:
+    """Create a new strategy record in the BD Histórica.
+
+    Returns 409 on duplicate (name, version); 422 on invalid semver.
+    """
+    try:
+        return _strategy_service().create(
+            name=payload.name,
+            version=payload.version,
+            description=payload.description,
+            parameters=payload.parameters,
+            lineage_parent_id=payload.lineage_parent_id,
+            market_type=payload.market_type,
+            status=payload.status,
+        )
+    except sqlite3.IntegrityError as exc:  # unique violation
+        raise HTTPException(
+            status_code=409,
+            detail=f"Strategy {payload.name!r} v{payload.version!r} already exists",
+        ) from exc
+
+
+@app.get("/api/strategies/compare")
+async def compare_strategies(
+    a: int = Query(..., description="strategy_a_id"),
+    b: int = Query(..., description="strategy_b_id"),
+    metric: str = Query("sharpe", description="metric to compare"),
+) -> dict[str, Any]:
+    """Compare two strategies on a single metric. Records the result."""
+    from src.db.service import PerformanceService
+
+    try:
+        return PerformanceService().compare(a, b, metric=metric)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/strategies/{strategy_id}")
+async def get_strategy_detail(strategy_id: int) -> dict[str, Any]:
+    """Return one strategy by id (decoded JSON columns)."""
+    row = _strategy_service().get(strategy_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    return row
+
+
+@app.get("/api/strategies/{strategy_id}/performance")
+async def get_strategy_performance(
+    strategy_id: int,
+    symbol: str | None = Query(None, description="Filter by symbol"),
+    limit: int = Query(100, ge=1, le=1000),
+) -> list[dict[str, Any]]:
+    """Return backtest performance history for a strategy."""
+    from src.db.service import PerformanceService
+
+    return PerformanceService().history(strategy_id, symbol=symbol, limit=limit)
+
+
+@app.get("/api/regimes")
+async def get_regimes(
+    limit: int = Query(50, ge=1, le=500),
+    current: bool = Query(False, description="Only return the current regime"),
+) -> Any:
+    """List recent market regimes or fetch the current one."""
+    from src.db.service import RegimeService
+
+    svc = RegimeService()
+    if current:
+        row = svc.current()
+        return row if row is not None else {}
+    return svc.history(limit=limit)
+
+
 # ---------------------------------------------------------------------------
 # Serve dashboards
 # ---------------------------------------------------------------------------

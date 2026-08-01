@@ -10,6 +10,7 @@ Registered strategies:
     - ``"breakout"`` / ``"range_break"`` → :class:`RangeBreakStrategy`
     - ``"volatility"``                 → :class:`VolatilityStrategy`
     - ``"confluence"``                 → :class:`ConfluenceStrategy`
+    - ``"gems"``                       → :class:`GemsStrategy`
 
 Usage::
 
@@ -26,6 +27,7 @@ from typing import Callable
 from src.strategies.base import Signal, SignalType, Strategy
 from src.strategies.range_break import RangeBreakConfig, RangeBreakStrategy
 from src.strategies.volatility import VolatilityConfig, VolatilityStrategy
+from src.strategies.gems import GemsConfig, GemsStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +153,7 @@ STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
     "range_break": RangeBreakStrategy,
     "volatility": VolatilityStrategy,
     "confluence": ConfluenceStrategy,
+    "gems": GemsStrategy,
 }
 
 # Default config class per strategy type
@@ -159,6 +162,7 @@ _CONFIG_REGISTRY: dict[str, type] = {
     "range_break": RangeBreakConfig,
     "volatility": VolatilityConfig,
     "confluence": type(None),  # Confluence uses sub-strategy defaults
+    "gems": GemsConfig,
 }
 
 
@@ -184,7 +188,7 @@ def create_strategy(
 
     Args:
         name:    Strategy name (case-insensitive). Must be in the registry.
-                 Accepts "breakout", "range_break", "volatility", "confluence".
+                 Accepts "breakout", "range_break", "volatility", "confluence", "gems".
         symbol:  Trading symbol to pass to the strategy.
         **kwargs: Extra arguments forwarded to the strategy constructor.
 
