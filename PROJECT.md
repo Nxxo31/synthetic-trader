@@ -357,11 +357,41 @@ Deriv ofrece todos estos mercados vía la **misma API WebSocket** con autenticac
 **✅ VIABLE.** El mayor enabler es que **Deriv's API es unificada** para los 4 tipos de mercado. No se necesita cambiar de broker o aprender nuevas APIs para forex, oro o cripto dentro de Deriv. El mayor riesgo técnico es la estimación de covarianza cross-asset en el Kelly portfolio (fase 3), pero es manejable con enfoques estadísticos robustos (shrinkage, regularización). Recomendación: empezar con **forex como Fase 1** porque es el análogo más cercano a sintéticos (spreads similares, alta liquidez, comportamiento de trend/range conocido).
 
 ---
-## 🧪 ESTADO ACTUAL — TRABAJO EN CURSO (NOCHE 2026-08-01)
-Investigación completada. 5 workers despachados en paralelo:
-- deleg_962ac7e4: LLM-as-Judge research + skills audit (completed)
-- deleg_07ec6892: Helmix P2 + BD Histórica (in progress)  
-- deleg_a9f584ff: Pair Trading OU + Mean Reversion BB+RSI (in progress)
+## 🧪 ESTADO ACTUAL — IMPLEMENTACIÓN NOCTURNA COMPLETADA (2026-08-01)
+
+### ✅ Completado (Fases 1-6 + Research):
+- **Helmix P0**: Status pill + Kill switch + Layout estratificado en page.tsx
+- **Helmix P1**: Equity curve shading + Drawdown chart + Two-typeface (Inter + JetBrains Mono) + Drawer pattern
+- **Helmix P2**: Risk panel con progress bars + Trade distribution histogram + Strategy comparison cards + Semantic color strict (colorblind-safe)
+- **BD Histórica**: SQLite migration_001.py con 6 tablas (strategies, strategy_performance, strategy_results, market_regimes, strategy_comparisons, optimization_experiments) + service.py (StrategyService, PerformanceService, RegimeService, OptimizationService) + 6 API endpoints
+- **Pair Trading OU**: src/strategies/pair_trading.py (737 líneas, commit 8936d14) — OU parameter estimation via OLS, Z-score signals, half-life filter, Engle-Granger cointegration test
+- **Mean Reversion BB+RSI**: src/strategies/mean_reversion.py — 3-confirmation entry (BB touch + RSI + close confirmation), ATR-based position sizing, daily loss limit
+- **LLM-as-Judge research**: Documento completo en /home/sebas/.hermes/research/llm-as-judge-and-skills-audit.md (32KB)
+- **Skill creada**: sophia-llm-as-judge-protocol en ~/.hermes/skills/ — protocol para usar dark_memory_judge/consensus + nucleus como adversarial reviewer
+- **Skills audit**: research-engineering eliminada (95% duplicada de research), requesting-code-review absorbida en code-review-and-quality
+
+### 🔲 Pendiente:
+- **Fase 7**: Paper trading end-to-end con datos reales de Deriv (requiere autorización del usuario)
+- **Fase 8**: Commit final + actualización PROJECT.md (en progreso)
+
+### 📊 Commits realizados:
+- `8936d14` feat(strategies): implement pair trading strategy based on OU process
+- `c902641` feat(api): implement BD histórica de estrategias (6 tables, service layer, API endpoints)
+- `50173f7` feat(backtest): fix type errors and improve backtest reporting
+
+### 📁 Archivos creados/modificados:
+- `src/db/migration_001.py` — esquema 6 tablas + índices + schema_migrations
+- `src/db/service.py` — 4 servicios (Strategy, Performance, Regime, Optimization)
+- `src/strategies/pair_trading.py` — PairTradingStrategy + cointegration_test
+- `src/strategies/mean_reversion.py` — MeanReversionStrategy con BB+RSI
+- `dashboard/src/app/page.tsx` — dashboard Helmix P0+P1+P2
+- `~/.hermes/skills/sophia-llm-as-judge-protocol/SKILL.md` — protocol LLM-as-Judge
+- `~/.hermes/research/llm-as-judge-and-skills-audit.md` — investigación completa (32KB)
+
+### 🔬 Persistencia dark-memory:
+- Sesión `sess-22e2c2165a8fb6f8` activa
+- Row 1 (pinned): Estado del plan nocturno
+- Row 2: Decisión LLM-as-Judge protocol
 
 ### 🔍 Worker: Análisis de Kraken Bot — COMPLETADO
 - **Bot Kraken encontrado**: GitHub `dyllanbarquero-glitch/kraken-pro-bot` (creado 27-jul-2026). Bot web Node/Express/WS para Boom/Crash 1000 y 900.
