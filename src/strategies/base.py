@@ -25,9 +25,9 @@ class Signal:
     take_profit: float
     duration_seconds: int
     confidence: float  # 0.0 to 1.0
-    metadata: dict[str, Any] = None
+    metadata: dict[str, Any] | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.metadata is None:
             self.metadata = {}
 

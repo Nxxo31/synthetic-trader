@@ -74,7 +74,7 @@ def calculate_atr(
         return atr
 
     # Default: simple rolling mean (min_periods=period for strict ATR)
-    return tr.rolling(window=period, min_periods=period).mean()
+    return pd.Series(tr.rolling(window=period, min_periods=period).mean())
 
 
 def calculate_ema(
@@ -155,4 +155,4 @@ def atr_pandas(
     ).max(axis=1)
 
     # Wilder's smoothing ≈ ewm with alpha = 1/period
-    return tr.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+    return pd.Series(tr.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean())

@@ -227,7 +227,8 @@ class BacktestEngine:
 
             if self.use_dynamic_kelly and signal.confidence > 0:
                 # Volatility multiplier from signal metadata (ATR ratio)
-                atr_ratio = signal.metadata.get("atr_ratio", 1.0)
+                metadata = signal.metadata or {}
+                atr_ratio = metadata.get("atr_ratio", 1.0)
                 vol_mult = 1.0 + max(0.0, (atr_ratio - 1.0))
                 size = self.risk_manager.position_size_dynamic(
                     capital, win_prob, win_amount, loss_amount,
@@ -419,9 +420,9 @@ class BacktestEngine:
         result.total_trades = len(result.trades)
         result.wins = sum(1 for t in result.trades if t.win)
         result.losses = result.total_trades - result.wins
-        result.win_rate = result.wins / result.total_trades if result.total_trades > 0 else 0
-        result.total_pnl = sum(t.pnl for t in result.trades)
-        result.avg_pnl = result.total_pnl / result.total_trades if result.total_trades > 0 else 0
+        result.win_rate = result.wins / result.total_trades if result.total_trades > 0 else 0.0
+        result.total_pnl = float(sum(t.pnl for t in result.trades))
+        result.avg_pnl = result.total_pnl / result.total_trades if result.total_trades > 0 else 0.0
         result.max_drawdown = max_dd
 
         # Sharpe ratio (simplified — assumes risk-free = 0)
@@ -436,12 +437,14 @@ class BacktestEngine:
         gross_loss = abs(sum(t.pnl for t in result.trades if t.pnl < 0))
         result.profit_factor = gross_profit / gross_loss if gross_loss > 0 else 999.0
 
-        # Expectancy in R
+        # Expectancy in R — cast np.float64 → float for dataclass field
         wins_r = [t.pnl_pct for t in result.trades if t.win]
         losses_r = [t.pnl_pct for t in result.trades if not t.win]
-        avg_win = np.mean(wins_r) if wins_r else 0
-        avg_loss = np.mean(losses_r) if losses_r else 0
-        result.expectancy = (result.win_rate * avg_win - (1 - result.win_rate) * avg_loss)
+        avg_win = float(np.mean(wins_r)) if wins_r else 0.0
+        avg_loss = float(np.mean(losses_r)) if losses_r else 0.0
+        result.expectancy = float(
+            result.win_rate * avg_win - (1 - result.win_rate) * avg_loss
+        )
 
         # Gate evaluation
         self._evaluate_gates(result)

@@ -85,8 +85,8 @@ class VolumeAnalyzer:
             vol = data["volume"]
             last_vol = float(vol.iloc[-1])
             if not bool(vol.isna().all()) and last_vol != 0:
-                return vol.astype(float)
+                return pd.Series(vol.astype(float))
         # Proxy: rango del candle como medida de actividad
         if "high" in data.columns and "low" in data.columns:
-            return (data["high"] - data["low"]).astype(float)
+            return pd.Series((data["high"] - data["low"]).astype(float))
         return None

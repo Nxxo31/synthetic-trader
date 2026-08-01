@@ -53,10 +53,10 @@ class VolatilityFilter:
         tr3 = (low - prev_close).abs()
 
         tr_frame = pd.concat([tr1, tr2, tr3], axis=1)
-        tr: pd.Series = tr_frame.max(axis=1)
+        tr: pd.Series = pd.Series(tr_frame.max(axis=1))
         atr = tr.rolling(window=self.atr_period, min_periods=1).mean()
 
-        return atr
+        return pd.Series(atr)
 
     def atr_ratio(self, data: pd.DataFrame) -> float:
         """Ratio ATR_actual / ATR_media.

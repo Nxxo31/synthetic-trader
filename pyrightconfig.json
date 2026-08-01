@@ -1,0 +1,8 @@
+{
+  "pythonVersion": "3.12",
+  "reportMissingImports": "none",
+  "reportMissingTypeStubs": "none",
+  "typeCheckingMode": "standard",
+  "venv": ".venv",
+  "venvPath": "."
+}
