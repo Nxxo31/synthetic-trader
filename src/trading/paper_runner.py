@@ -55,6 +55,9 @@ REALTIME_STATE_FILE = "/home/sebas/proyectos/synthetic-trader/realtime/paper_sta
 EQUITY_FILE = "/home/sebas/proyectos/synthetic-trader/realtime/equity.jsonl"
 TRADES_FILE = "/home/sebas/proyectos/synthetic-trader/realtime/trades.jsonl"
 
+# Consecutive reconnect failures before a clean halt + dashboard alert.
+MAX_RECONNECT_FAILURES_GLOBAL = 5
+
 
 @dataclass
 class PaperTrade:
@@ -129,6 +132,14 @@ class PaperTradingEngine:
         self.balance: float = 10000.0
         self.starting_balance: float = 10000.0
         self.is_running = False
+        # --- reconnect / stale-data robustness (see _trading_loop) ---
+        # Last known-good candles used when a fetch fails so the strategy
+        # still gets validated data (with stale_data=True flag) instead of
+        # None/empty.  Reduces false NO_SIGNAL on transient WS drops.
+        self._last_valid_candles: pd.DataFrame = pd.DataFrame()
+        # Consecutive failed reconnect attempts.  When this reaches 5 we
+        # halt cleanly and push an alert to the dashboard via paper_state.json.
+        self._reconnect_failures: int = 0
 
         # Reporte
         self.report_dir = Path("reports/paper")
@@ -225,71 +236,170 @@ class PaperTradingEngine:
             logger.debug(f"Could not write realtime trade: {e}")
 
     async def _trading_loop(self, client: DerivClient) -> None:
-        """Loop principal: acumula candles y genera signals."""
-        tick_count = 0
-        last_candle_time = 0
-        current_candle: dict[str, Any] = {}
+        """Loop principal: acumula candles y genera signals.
 
-        # Subscribe to ticks
+        Robustez (v0.4.1+):
+          * try/except por iteración — un error nunca mata el loop.
+          * Al detectar "Not connected" llama ``client.reconnect()`` con
+            backoff exponencial (gestión transparente de re-OTP, ya que el
+            OTP de Deriv es single-use y expira en 120s).
+          * 5 fallos consecutivos de reconexión → halt limpio + alerta.
+          * Si fetch candles falla pero existe un df previo válido, la
+            estrategia recibe ese df con stale_data=True (no None/empty).
+        """
+        # Subscribe to ticks (no-op failure here is fatal — lets run() raise).
         logger.info("Subscribing to ticks for %s...", self.symbol)
-        tick_response = await client.subscribe_ticks(self.symbol)
+        await client.subscribe_ticks(self.symbol)
         logger.info("Tick subscription active")
 
         while self.is_running and len(self.trades) < self.max_trades:
-            # Check daily rollover (generate report if new day UTC)
-            self._check_daily_rollover()
-
-            # Check if we're halted
-            cb_ok, cb_reason = self.circuit_breaker.can_trade()
-            if not cb_ok:
-                logger.warning("Circuit breaker: %s. Waiting 60s...", cb_reason)
-                await asyncio.sleep(60)
-                continue
-
-            # In real implementation, this would process live ticks
-            # For now, we simulate by downloading fresh candles periodically
-            logger.info("Paper trade %d/%d | Balance: $%.2f | P&L: $%.2f",
-                        len(self.trades) + 1, self.max_trades,
-                        self.balance, self.balance - self.starting_balance)
-
-            # Download latest candles
             try:
-                fresh = await client.ticks_history(
-                    symbol=self.symbol,
-                    count=50,
-                    style="candles",
-                    granularity=CANDLE_GRANULARITY,
-                )
-                new_candles = fresh.get("candles", [])
-                if new_candles:
-                    new_df = pd.DataFrame(new_candles)
-                    new_df["epoch"] = pd.to_numeric(new_df["epoch"])
-                    new_df["datetime"] = pd.to_datetime(new_df["epoch"], unit="s")
-                    # Append to existing candles (deduplicate by epoch)
-                    self.candles = pd.concat([self.candles, new_df]).drop_duplicates(
-                        subset=["epoch"]
-                    ).sort_values("epoch").reset_index(drop=True)
+                # Check daily rollover (generate report if new day UTC)
+                self._check_daily_rollover()
+
+                # Check if we're halted
+                cb_ok, cb_reason = self.circuit_breaker.can_trade()
+                if not cb_ok:
+                    logger.warning("Circuit breaker: %s. Waiting 60s...", cb_reason)
+                    await asyncio.sleep(60)
+                    continue
+
+                logger.info("Paper trade %d/%d | Balance: $%.2f | P&L: $%.2f",
+                            len(self.trades) + 1, self.max_trades,
+                            self.balance, self.balance - self.starting_balance)
+
+                # Download latest candles (may raise if WS dropped).
+                stale_data = False
+                try:
+                    fresh = await client.ticks_history(
+                        symbol=self.symbol,
+                        count=50,
+                        style="candles",
+                        granularity=CANDLE_GRANULARITY,
+                    )
+                    new_candles = fresh.get("candles", [])
+                    if new_candles:
+                        new_df = pd.DataFrame(new_candles)
+                        new_df["epoch"] = pd.to_numeric(new_df["epoch"])
+                        new_df["datetime"] = pd.to_datetime(new_df["epoch"], unit="s")
+                        self.candles = pd.concat([self.candles, new_df]).drop_duplicates(
+                            subset=["epoch"]
+                        ).sort_values("epoch").reset_index(drop=True)
+                    # Fetch succeeded → this is a known-good snapshot.
+                    if not self.candles.empty:
+                        self._last_valid_candles = self.candles.copy()
+                except (RuntimeError, ConnectionError, OSError, DerivAPIError) as e:
+                    # WebSocket dropped or credentials expired (OTP 120s).
+                    # Attempt transparent reconnection before giving up.
+                    logger.warning("Fetch failed (likely WS drop): %s — reconnecting...", e)
+                    reconnected = await self._reconnect_or_halt(client)
+                    if not reconnected:
+                        break  # halt already issued
+                    # Connection restored but we couldn't fetch this round:
+                    # fall back to last known-good candles (stale).
+                    if not self._last_valid_candles.empty:
+                        stale_data = True
+                        self.candles = self._last_valid_candles.copy()
+                        logger.info("Using last-known-good candles (stale_data=True): %d rows",
+                                    len(self.candles))
+                    else:
+                        logger.warning("No prior candles and fetch failed — skipping iteration")
+                        await asyncio.sleep(10)
+                        continue
+                except Exception as e:
+                    # Non-connection error (parsing, etc.) — log and continue.
+                    logger.error("Unexpected error fetching candles: %s", e)
+                    if not self._last_valid_candles.empty:
+                        stale_data = True
+                        self.candles = self._last_valid_candles.copy()
+                    await asyncio.sleep(10)
+                    continue
+
+                # Generate signal only if we have validated data to work with.
+                if self.candles is not None and not self.candles.empty and \
+                   len(self.candles) >= self._get_min_required_candles() + 1:
+                    if stale_data:
+                        logger.info("Generating signal on STALE data (no live fetch this round)")
+                    signal = self.strategy.generate_signal(self.candles)
+
+                    if signal.type != SignalType.NO_SIGNAL:
+                        await self._execute_signal(client, signal)
+                else:
+                    logger.debug("INSUFFICIENT_CANDLES: have %d, need %d",
+                                 len(self.candles) if self.candles is not None else 0,
+                                 self._get_min_required_candles() + 1)
+
+                # Update real-time state file for dashboard/API
+                self._write_realtime_state()
+
             except Exception as e:
-                logger.error("Error fetching candles: %s", e)
-                await asyncio.sleep(60)
-                continue
-
-            # Generate signal
-            if len(self.candles) >= self.strategy.config.min_channel_ticks + 1:
-                signal = self.strategy.generate_signal(self.candles)
-
-                if signal.type != SignalType.NO_SIGNAL:
-                    await self._execute_signal(client, signal)
-
-            # Update real-time state file for dashboard/API
-            self._write_realtime_state()
-
-            # Wait before next check (1 minute candle = check every 60s)
-            # Use shorter interval for responsiveness
-            await asyncio.sleep(10)
+                # Per-iteration safety net: never let a single error kill the
+                # trading loop.  Log, back off, keep going.
+                logger.error("Trading loop iteration error (continuing): %s", e, exc_info=True)
+                # Heuristic: if it looks connection-related, try reconnect.
+                if "connect" in str(e).lower() or "not connected" in str(e).lower():
+                    reconnected = await self._reconnect_or_halt(client)
+                    if not reconnected:
+                        break
+            finally:
+                # Wait before next check (1 minute candle = check every 60s)
+                # Use shorter interval for responsiveness.
+                await asyncio.sleep(10)
 
         self.is_running = False
         logger.info("Paper trading complete: %d trades executed", len(self.trades))
+
+    async def _reconnect_or_halt(self, client: DerivClient) -> bool:
+        """Attempt ``client.reconnect()`` with exponential backoff (handled
+        inside DerivClient.reconnect).  If the full multi-attempt cycle fails,
+        halt cleanly and alert the dashboard.
+
+        Returns True if the client is (now) connected, False if it gave up
+        and the loop should stop.
+        """
+        # DerivClient.reconnect does the 5-attempt exponential backoff itself.
+        ok = await client.reconnect(max_attempts=MAX_RECONNECT_FAILURES_GLOBAL)
+        if ok:
+            self._reconnect_failures = 0
+            # Re-subscribe to ticks on the fresh WebSocket (old sub died with WS).
+            try:
+                await client.subscribe_ticks(self.symbol)
+                logger.info("Re-subscribed to ticks after reconnect")
+            except Exception as e:
+                logger.warning("Re-subscribe after reconnect failed: %s", e)
+            return True
+
+        self._reconnect_failures = MAX_RECONNECT_FAILURES_GLOBAL
+        logger.critical("Reconnect cycle failed after %d attempts — HALTING",
+                        MAX_RECONNECT_FAILURES_GLOBAL)
+        await self._halt_and_alert("reconnect_failed")
+        return False
+
+    async def _halt_and_alert(self, reason: str) -> None:
+        """Halt trading cleanly and push an alert to the dashboard state file."""
+        self.is_running = False
+        try:
+            state = {
+                "mode": "paper",
+                "symbol": self.symbol,
+                "is_halted": True,
+                "halt_reason": reason,
+                "alert": (
+                    f"Bot halted: {reason}. "
+                    f"Reconnect failed {self._reconnect_failures} times. "
+                    "Manual intervention required."
+                ),
+                "last_update": datetime.now(timezone.utc).isoformat(),
+                "balance": self.balance,
+                "pnl": self.balance - self.starting_balance,
+                "trades_today": len(self.today_trades),
+            }
+            os.makedirs(os.path.dirname(REALTIME_STATE_FILE), exist_ok=True)
+            with open(REALTIME_STATE_FILE, "w") as f:
+                json.dump(state, f, indent=2)
+            logger.error("Alert written to %s: %s", REALTIME_STATE_FILE, reason)
+        except Exception as e:
+            logger.error("Could not write halt alert: %s", e)
 
     async def _execute_signal(self, client: DerivClient, signal: Signal) -> None:
         """Ejecuta una signal en la cuenta demo."""

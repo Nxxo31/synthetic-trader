@@ -219,6 +219,45 @@ class DerivClient:
         self._subscriptions.clear()
         logger.info("Disconnected from Deriv")
 
+    async def reconnect(self, max_attempts: int = 5) -> bool:
+        """Reconnect with exponential backoff (1,2,4,8,...,max 60s).
+
+        Requests a fresh OTP (the previous one is single-use and expired)
+        and opens a new WebSocket.  This preserves the same DerivClient
+        instance so callers (e.g. paper_runner) keep their reference.
+
+        Returns True on success, False after ``max_attempts`` consecutive
+        failures — caller should then halt cleanly and alert the dashboard.
+        """
+        # Tear down any half-open state first (idempotent).
+        try:
+            await self.disconnect()
+        except Exception as e:
+            logger.debug("disconnect during reconnect raised: %s", e)
+
+        delay = 1.0
+        max_delay = 60.0
+        for attempt in range(1, max_attempts + 1):
+            logger.warning(
+                "Reconnect attempt %d/%d (backoff %.0fs)...",
+                attempt, max_attempts, delay,
+            )
+            try:
+                # connect() raises on OTP/WS failure; on success we're live.
+                await self.connect()
+                logger.info("Reconnected to Deriv on attempt %d", attempt)
+                return True
+            except Exception as e:
+                logger.error("Reconnect attempt %d failed: %s", attempt, e)
+                if attempt < max_attempts:
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2.0, max_delay)
+
+        logger.critical(
+            "Reconnect failed after %d attempts — giving up", max_attempts,
+        )
+        return False
+
     @property
     def is_connected(self) -> bool:
         return self._connected
