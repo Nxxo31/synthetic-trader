@@ -110,7 +110,7 @@ async def get_bot_status() -> dict:
             # Ensure expected fields
             return with_aliases({
                 "bot_id": "synthetic-trader-001",
-                "strategy": state.get("symbol", "RangeBreak"),
+                "strategy": state.get("strategy", state.get("symbol", "RangeBreak")),
                 "symbol": state.get("symbol", "RB100"),
                 "mode": state.get("mode", "paper"),
                 "balance": state.get("balance", 10000.0),
