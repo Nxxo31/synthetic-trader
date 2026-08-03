@@ -28,7 +28,7 @@ Auth: Bearer token (PAT) en headers + Deriv-App-ID header
 
 Flujo de conexión:
   1. POST /trading/v1/options/accounts/{accountId}/otp
-     Headers: Deriv-App-ID, Authorization: Bearer ***
+     Headers: Deriv-App-ID, Authorization: Bearer {PAT}
      → Response: { data: { url: "wss://api.derivws.com/.../ws/demo?otp=xxx" } }
   2. Conectar WebSocket a la URL devuelta (OTP válido 120s, un solo uso)
   3. Enviar JSON: ticks, proposal, buy, sell, etc.
@@ -83,3 +83,9 @@ Phase 4: Live Trading → solo con aprobacion explicita
 
 NO vitest, NO jest, NO playwright, NO `tsc --noEmit` directo. Los gates son determinísticos: LSP live_diagnostics + delegate_task review + gitleaks + GitHub commit.
 NO separate spec files, drift reports, docs/specs/, architecture overviews, or any .md outside PROJECT.md. Everything goes in PROJECT.md.
+
+## Editing code files
+- Leer archivo completo antes de editar
+- Sin sed multilinea en Python
+- Validar con typecheck/lint despues de cambios
+- Si un edit falla 2 veces: parar y reportar

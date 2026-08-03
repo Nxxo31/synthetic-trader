@@ -45,6 +45,47 @@ from src.trading.strategy_factory import create_strategy
 
 logger = logging.getLogger(__name__)
 
+
+# Symbol-prefix → strategy registry key, used by the ``"auto"`` selector.
+# Keep in sync with ``src/trading/strategy_factory.py`` STRATEGY_REGISTRY.
+#
+# Each instrument family has a strategy that matches its price generation
+# process. Using the wrong strategy (e.g. range-break on a volatility index)
+# produces ZERO signals because the strategy's assumptions don't match the
+# instrument's structure (R_100 follows an Ornstein-Uhlenbeck process; it
+# has no channel support/resistance).
+#
+#   R_100, R_75, R_50, R_25, R_10  → "volatility"  (ATR-band mean reversion)
+#   RB100, RB200                    → "breakout"    (channel breakout)
+#   BOOM*, CRASH*                   → "drift_boom_crash"
+#   STEPT*, STE*                    → "step_index"
+#
+# ``"auto"`` resolves to one of the above based on ``symbol``.  An explicit
+# strategy_name passed in always wins.
+def _auto_resolve_strategy(symbol: str) -> str:
+    """Map a Deriv synthetic symbol to the matching strategy registry key.
+
+    The order of checks matters: ``RB`` must be checked before ``R_`` (both
+    share the ``R`` prefix).  Returns a key that exists in
+    ``STRATEGY_REGISTRY``.
+    """
+    sym = symbol.upper().strip()
+    if sym.startswith("RB"):
+        return "breakout"          # Range Break indices (RB100, RB200)
+    if sym.startswith("R_"):
+        return "volatility"        # Volatility indices (R_10..R_100)
+    if sym.startswith(("BOOM", "CRASH")):
+        return "drift_boom_crash"  # Boom/Crash spike indices
+    if sym.startswith(("STEPT", "STE")):
+        return "step_index"        # Step indices
+    # Unknown family — default to volatility (safest for non-channel indices).
+    logger.warning(
+        "Symbol %s doesn't match a known family; defaulting to volatility "
+        "strategy. Specify strategy_name explicitly to override.",
+        symbol,
+    )
+    return "volatility"
+
 # Cuántas candles históricas para warmup
 WARMUP_CANDLES = 500
 # Threshold del scorer (optimizado en Fase 1)
@@ -96,11 +137,19 @@ class PaperTradingEngine:
         symbol: str = "RB100",
         max_trades: int = 30,
         score_threshold: float = SCORE_THRESHOLD,
-        strategy_name: str = "breakout",
+        strategy_name: str = "auto",
     ) -> None:
         self.symbol = symbol
         self.max_trades = max_trades
         self.score_threshold = score_threshold
+        # Resolve ``"auto"`` → correct strategy key for this symbol's family.
+        # This is the default: each instrument gets the strategy that matches
+        # its price-generation process (R_100 → volatility, RB100 → range
+        # break, BOOM/CRASH → drift, STEPT → step index).  An explicit
+        # strategy_name passed in is honoured verbatim.
+        if strategy_name == "auto":
+            strategy_name = _auto_resolve_strategy(symbol)
+            logger.info("Auto-resolved strategy: %s → %s", symbol, strategy_name)
         self.strategy_name = strategy_name
 
         # Componentes del sistema
@@ -126,10 +175,15 @@ class PaperTradingEngine:
         self.starting_balance_daily = 10000.0
         self.today_trades: list[dict[str, Any]] = []
 
-        # Multi-strategy via factory — uses create_strategy() registry
+        # Multi-strategy via factory — all strategies (including "breakout")
+        # are created through the same named registry so the runner stays
+        # symbol/strategy-agnostic.  The "auto" default already resolved to a
+        # concrete key above; an explicit strategy_name is passed through
+        # unchanged.  RangeBreak gets the scorer/threshold it expects.
         scorer = SignalScorer(entry_threshold=score_threshold)
         if strategy_name == "breakout":
-            self.strategy = RangeBreakStrategy(
+            self.strategy = create_strategy(
+                strategy_name,
                 symbol=symbol,
                 config=RangeBreakConfig(),
                 signal_scorer=scorer,
@@ -139,7 +193,10 @@ class PaperTradingEngine:
             # Factory creates any registered strategy: volatility, confluence,
             # step_index, drift_boom_crash
             self.strategy = create_strategy(strategy_name, symbol=symbol)
-            logger.info("Using factory strategy: %s → %s", strategy_name, self.strategy.__class__.__name__)
+        logger.info(
+            "Strategy initialized: %s → %s (symbol=%s, key=%s)",
+            strategy_name, self.strategy.__class__.__name__, symbol, strategy_name,
+        )
 
         self.recommender = Recommender(capital=10000.0)
 
@@ -680,15 +737,17 @@ class PaperTradingEngine:
 async def run_paper_trading(
     symbol: str = "RB100",
     max_trades: int = 30,
-    strategy_name: str = "breakout",
+    strategy_name: str = "auto",
 ) -> None:
     """Entry point para paper trading.
 
     Args:
         symbol: Símbolo a tradear
         max_trades: Máximo trades antes de parar
-        strategy_name: Nombre de estrategia (breakout, volatility, confluence,
-                       step_index, drift_boom_crash)
+        strategy_name: Nombre de estrategia (auto, breakout, volatility,
+                       confluence, step_index, drift_boom_crash). ``"auto"``
+                       resolves the correct strategy from the symbol's
+                       instrument family.
     """
     config = DerivConfig.from_yaml()
     client = DerivClient(config)

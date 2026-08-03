@@ -1,9 +1,19 @@
 :root {
-  --background: #0f0f10;
-  --foreground: #e4e4e7;
-  --bg-panel: #161618;
-  --bg-card: #1c1c1f;
-  --border: #2a2a2e;
+  /* SynthIA Terminal — Design Tokens */
+  --background: #0a0e14;
+  --foreground: #e4e9f0;
+  --text-muted: #5a6577;
+  --panel: #12161c;
+  --card: #161b24;
+  --border: #1e2530;
+  --border-hover: #2a3540;
+  --accent-cyan: #00d4ff;
+  --accent-green: #00ff9d;
+  --accent-red: #ff3860;
+  --accent-amber: #ffb547;
+  --glow-cyan: 0 0 20px rgba(0, 212, 255, 0.15);
+  --radius: 4px;
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', ui-monospace, monospace;
 }
 
 html {
@@ -41,33 +51,52 @@ button {
   font-family: inherit;
 }
 
-/* Custom range slider baseline (overridable by modules) */
+/* Range slider baseline */
 input[type='range'] {
   appearance: none;
   -webkit-appearance: none;
   background: transparent;
 }
 
-/* Scrollbar styling for dark theme */
+/* Scrollbar — thin, terminal-style */
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 6px;
+  height: 6px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #2a2a2e;
-  border-radius: 5px;
+  background: var(--border);
+  border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #3a3a3e;
+  background: var(--border-hover);
 }
 
-/* Keep the Instrument Serif / Inter pairing for the projection zone */
+/* Utility classes */
+.font-mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
 .font-display,
 .bigNumber,
 .logo,
 .brandMark {
   font-family: 'Instrument Serif', Georgia, serif;
+}
+
+/* Pulsing dot animation for live status */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(0, 255, 157, 0.4); }
+  50% { opacity: 0.6; box-shadow: 0 0 0 6px rgba(0, 255, 157, 0); }
+}
+
+.pulse-dot {
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-dot { animation: none; }
 }

@@ -2,10 +2,10 @@
   display: flex;
   align-items: center;
   gap: 24px;
-  height: 56px;
-  padding: 0 24px;
-  background: #161618;
-  border-bottom: 1px solid #2a2a2e;
+  height: 52px;
+  padding: 0 20px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
   z-index: 50;
@@ -18,35 +18,49 @@
   text-decoration: none;
   color: inherit;
 }
+
+/* Hexagonal ST logo mark */
 .brandMark {
-  font-family: "Instrument Serif", Georgia, serif;
-  font-size: 22px;
-  font-style: italic;
-  color: #fafafa;
-  line-height: 1;
   width: 32px;
   height: 32px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: #1c1c1f;
-  border: 1px solid #2a2a2e;
-  border-radius: 8px;
+  background: linear-gradient(135deg, rgba(0, 212, 255, 0.12), rgba(0, 212, 255, 0.04));
+  border: 1px solid var(--accent-cyan);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--accent-cyan);
+  letter-spacing: -0.5px;
+  text-shadow: 0 0 8px rgba(0, 212, 255, 0.4);
+  line-height: 1;
+  clip-path: polygon(15% 0, 85% 0, 100% 50%, 85% 100%, 15% 100%, 0 50%);
 }
-.brandMark b { color: #2dd4bf; }
+
 .brandName {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
-  color: #e4e4e7;
-  letter-spacing: 0.2px;
+  color: var(--foreground);
+  letter-spacing: 0.3px;
 }
+
+.brandSub {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-muted);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
 @media (max-width: 640px) {
-  .brandName { display: none; }
+  .brandName, .brandSub { display: none; }
 }
 
 .list {
   display: flex;
-  gap: 4px;
+  gap: 2px;
   list-style: none;
   padding: 0;
   margin: 0;
@@ -58,38 +72,37 @@
 .link {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 14px;
-  border-radius: 8px;
-  font-size: 13px;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  font-size: 12px;
   font-weight: 500;
-  color: #71717a;
+  color: var(--text-muted);
   text-decoration: none;
   transition: color 0.15s ease, background 0.15s ease;
   white-space: nowrap;
-  min-height: 36px;
+  min-height: 30px;
+  border: 1px solid transparent;
 }
-.link:hover { color: #e4e4e7; background: #1c1c1f; }
+.link:hover {
+  color: var(--foreground);
+  background: var(--card);
+}
 .link:focus-visible {
-  outline: 2px solid #818cf8;
+  outline: 2px solid var(--accent-cyan);
   outline-offset: 2px;
 }
 .active {
-  color: #fafafa;
-  background: #1c1c1f;
-}
-.active::after {
-  content: "";
-  position: absolute;
+  color: var(--accent-cyan);
+  background: rgba(0, 212, 255, 0.08);
+  border-color: rgba(0, 212, 255, 0.2);
 }
 
 .icon {
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1;
   color: inherit;
-  opacity: 0.85;
 }
-.active .icon { color: #2dd4bf; }
 
 @media (prefers-reduced-motion: reduce) {
   .link { transition: none; }

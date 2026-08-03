@@ -141,11 +141,12 @@ Ciclo completo: tick → análisis → señal → (paper/live) → estado realti
 | R-22 | API endpoints allocator/attribution/projection | `api/server.py` | ✅ | GET/POST verificados en puerto 8001 |
 | R-23 | API aliases español (middleware) | `api/_aliases.py` | ✅ | with_aliases() aggiorna claves español |
 | R-24 | Paper trading 24/7 con reconexión | `scripts/paper_247.py` | ✅ | Wrapper con backoff, crash-loop detection |
-| R-25 | Servicio systemd para paper trading | `deploy/systemd/*.service` | ✅ | Unit creado (pendiente install en sistema) |
-| R-26 | Atribución diaria automática | `analysis/daily_attribution.py` | ✅ | Script nocturno puebla strategies.db |
+| R-25 | Servicio systemd para paper trading | `deploy/synthetic-trader-paper.service`, `deploy/systemd/synthetic-trader-paper.service` | ✅ | Units creados (pendiente `systemctl enable` — requiere sudo) |
+| R-26 | Atribución diaria automática | `src/analysis/daily_attribution.py` | ✅ | Script nocturno puebla strategies.db |
 | R-27 | Dashboard zona proyección (/projection) | `dashboard/src/app/projection/` | ✅ | Split Panes (Variante B), Recharts, CSS Modules |
 | R-28 | Dashboard principal en español | `dashboard/src/app/page.tsx` | ✅ | KPIs, tabla, panel riesgo sin siglas |
 | R-29 | Multi-strategy en paper_runner | `trading/paper_runner.py` | ✅ | strategy_name param + factory + allocator |
+| R-30 | Timer systemd para attribution diaria | `deploy/synthetic-trader-attribution.timer`, `deploy/synthetic-trader-attribution.service` | ✅ | Timer + service oneshot creados (pendiente `systemctl enable` — requiere sudo) |
 
 ---
 
@@ -236,6 +237,60 @@ Fuentes: `docs/investigacion-estrategias-bots-multi-mercado.md`, `docs/research-
 
 ---
 
+## 🚀 Deploy systemd — Paper Trading 24/7 + Attribution Diaria
+
+### Archivos creados
+
+| Archivo | Propósito | Estado |
+|---------|-----------|--------|
+| `deploy/systemd/synthetic-trader-paper.service` | Unit hardened (NoNewPrivileges, ProtectSystem, MemoryMax 2G, args paper_247.py) | ✅ creado |
+| `deploy/synthetic-trader-paper.service` | Unit minimalista de referencia del task | ✅ creado |
+| `deploy/synthetic-trader-attribution.service` | Servicio oneshot: puebla `strategies.db` desde `reports/daily/*.json` | ✅ creado |
+| `deploy/synthetic-trader-attribution.timer` | Timer `OnCalendar=daily` con `Persistent=true` | ✅ creado |
+
+### Validación de sintaxis
+
+```
+$ systemd-analyze verify deploy/synthetic-trader-paper.service \
+    deploy/synthetic-trader-attribution.service \
+    deploy/synthetic-trader-attribution.timer
+# exit 0, sin warnings
+```
+
+### Instrucciones de instalación (requiere sudo — NO ejecutar desde el agent)
+
+```bash
+# 1. Copiar units al directorio de systemd (recomendado: versión hardened)
+sudo cp deploy/systemd/synthetic-trader-paper.service /etc/systemd/system/
+sudo cp deploy/synthetic-trader-attribution.service   /etc/systemd/system/
+sudo cp deploy/synthetic-trader-attribution.timer     /etc/systemd/system/
+
+# 2. Recargar systemd para que detecte los units nuevos
+sudo systemctl daemon-reload
+
+# 3. Habilitar y arrancar paper trading 24/7
+sudo systemctl enable --now synthetic-trader-paper
+systemctl status synthetic-trader-paper   # verificar: active (running)
+
+# 4. Habilitar el timer de attribution diaria (no arrancar el servicio directo)
+sudo systemctl enable --now synthetic-trader-attribution.timer
+systemctl list-timers synthetic-trader-attribution   # verificar: próximo disparo 00:00
+
+# 5. (Opcional) Test manual del oneshot de attribution
+sudo systemctl start synthetic-trader-attribution.service
+journalctl -u synthetic-trader-attribution -e
+```
+
+### Notas operativas
+
+- **Paper trader ya corriendo**: el proceso actual (PID 5505, `python scripts/paper_247.py` en background) se debe detener antes de `systemctl start` para que systemd gestione el lifecycle (si no, dos instancias harán trades duplicados). Parar con `kill 5505` (o `pkill -f paper_247.py`) antes del paso 3.
+- **Idempotencia del attribution**: `daily_attribution.py` detecta rows duplicados por `(strategy_name, symbol, backtest_date, total_trades, total_pnl)` y los saltea. Re-ejecutar el servicio manualmente no duplica datos.
+- **Catch-up con `Persistent=true`**: si el host estuvo apagado a 00:00, systemd dispara el timer al arranque en vez de esperar al día siguiente. Útil para VPS/laptops.
+- **Logs**: `journalctl -u synthetic-trader-paper -f` (paper trader) y `journalctl -u synthetic-trader-attribution -e` (attribution).
+- **Venv**: los ExecStart apuntan a `.venv/bin/python` (symlink a `python3`). Si las deps del project cambian y se recrea el venv, el symlink sigue válido (mismo path).
+
+---
+
 ## 📦 Estado de Implementación
 
 ### Fases Completadas
@@ -262,8 +317,8 @@ Fuentes: `docs/investigacion-estrategias-bots-multi-mercado.md`, `docs/research-
 | B-3 | Live trading deploy (requiere aprobación explícita del usuario) | Media |
 | B-4 | Alertas Telegram (telegram.py skeleton existe) | Media |
 | B-5 | Multi-bot orchestration (≥2 bots concurrentes con arbitraje) | Baja |
-| B-6 | Instalar servicio systemd para paper trading persistente | Alta |
-| B-7 | Programar daily_attribution.py en cron/systemd timer | Alta |
+| B-6 | ✅ Instalar servicio systemd para paper trading persistente — archivos creados en `deploy/`, pendiente `systemctl enable` (ver § Deploy systemd) | Alta | _done: archivos creados_ |
+| B-7 | ✅ Programar daily_attribution.py en systemd timer — `deploy/synthetic-trader-attribution.timer` creado, pendiente `systemctl enable` (ver § Deploy systemd) | Alta | _done: archivos creados_ |
 | B-8 | Rotación automática de estrategias según attribution ranking | Media |
 
 ---

@@ -223,7 +223,7 @@ async def main() -> None:
             from src.trading.paper_runner import run_paper_trading
             # Accept optional symbol and strategy from CLI args
             paper_symbol = sys.argv[2] if len(sys.argv) > 2 else "R_100"
-            paper_strategy = sys.argv[3] if len(sys.argv) > 3 else "breakout"
+            paper_strategy = sys.argv[3] if len(sys.argv) > 3 else "auto"
             console.print("[yellow]Starting paper trading on Deriv demo account...[/yellow]")
             console.print(f"[dim]Symbol: {paper_symbol} | Strategy: {paper_strategy} | Max trades: 30[/dim]")
             console.print("[bold red]Paper trading ONLY — no real money at risk.[/bold red]")

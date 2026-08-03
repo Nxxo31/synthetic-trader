@@ -32,6 +32,7 @@ REPORTS_DIR = PROJECT_ROOT / "reports" / "backtest"
 DAILY_REPORTS_DIR = PROJECT_ROOT / "reports" / "daily"
 DASHBOARD_DIR = PROJECT_ROOT / "dashboard"
 REALTIME_STATE_FILE = PROJECT_ROOT / "realtime" / "paper_state.json"
+REALTIME_TRADES_FILE = PROJECT_ROOT / "realtime" / "trades.jsonl"
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +191,20 @@ async def get_bot_status() -> dict:
 
 @app.get("/api/bot/trades")
 async def get_bot_trades() -> list:
-    """Historial de trades del último reporte."""
+    """Historial de trades — prioriza datos en tiempo real (paper_state.json),
+    fallback al último reporte de backtest."""
+    # 1) Live trades from paper_state.json (realtime)
+    if os.path.exists(REALTIME_STATE_FILE):
+        try:
+            with open(REALTIME_STATE_FILE, "r") as f:
+                state = json.load(f)
+            live_trades = state.get("recent_trades", [])
+            if live_trades:
+                return with_aliases(live_trades)
+        except Exception:
+            pass
+
+    # 2) Fallback to backtest report
     json_files = (
         sorted(REPORTS_DIR.glob("*.json"), key=os.path.getmtime, reverse=True)
         if REPORTS_DIR.exists()
@@ -421,16 +435,63 @@ async def websocket_live_data(websocket: WebSocket) -> None:
 
 @app.get("/api/allocator/config")
 async def get_allocator_config() -> dict:
-    """Get current capital allocator configuration."""
-    # For now, return default configuration
-    # In the future, this could come from persistent config
+    """Get current capital allocator configuration.
+
+    Reads the live bot balance from ``realtime/paper_state.json`` (the actual
+    Deriv demo account balance while paper trading) and computes the
+    reserve / surplus split via :class:`CapitalAllocatorConfig` +
+    :class:`CapitalAllocator`.
+
+    If no live state file exists (paper trading not started), falls back to
+    the configured ``initial_capital`` default and reports ``data_available:
+    false`` so the dashboard can degrade gracefully.
+    """
+    from src.risk.capital_allocator import CapitalAllocator, CapitalAllocatorConfig
+
+    # Live balance from realtime state (actual Deriv demo account balance)
+    live_balance: float | None = None
+    live_pnl: float = 0.0
+    data_available = False
+    if REALTIME_STATE_FILE.exists():
+        try:
+            with open(REALTIME_STATE_FILE, "r") as f:
+                state = json.load(f)
+            live_balance = float(state.get("balance", 0.0))
+            live_pnl = float(state.get("pnl", 0.0))
+            data_available = True
+        except Exception:
+            live_balance = None
+
+    # Build the allocator config — uses CapitalAllocatorConfig defaults
+    # (reserva_pct=0.80, superávit_diario_pct=0.20, initial_capital=10000.0)
+    config = CapitalAllocatorConfig(
+        initial_capital=live_balance if live_balance is not None else 10000.0,
+    )
+    allocator = CapitalAllocator(config)
+    allocator.reset_daily(
+        capital_total=live_balance if live_balance is not None else config.initial_capital
+    )
+    if live_pnl != 0.0:
+        allocator.record_trade(live_pnl)
+    state = allocator.get_state()
+
     return with_aliases({
-        "capital_total": 1000.0,
-        "reserva_pct": 0.80,
-        "max_daily_pct": 0.20,
-        "reinvest_profits": True,
-        "min_micro_stake": 1.0,
-        "max_micro_stake_pct": 0.15
+        "data_available": data_available,
+        "capital_total": state["capital_total"],
+        "reserva": state["reserva"],
+        "superávit_diario": state["superávit_diario"],
+        "superávit_disponible": state["superávit_disponible"],
+        "superávit_usado": state["superávit_usado"],
+        "reserva_pct": config.reserva_pct,
+        "superávit_diario_pct": config.superávit_diario_pct,
+        "live_balance": live_balance if live_balance is not None else config.initial_capital,
+        "live_pnl": live_pnl,
+        "trades_today": state["trades_count"],
+        "total_pnl": state["total_pnl"],
+        "return_pct": state["return_pct"],
+        "is_active": state["is_active"],
+        "rebalance_daily": config.rebalance_daily,
+        "min_surplus": config.min_surplus,
     })
 
 @app.post("/api/allocator/config")
@@ -563,108 +624,181 @@ async def get_equity_projection(
     surplus: float = 200.0
 ) -> dict:
     """
-    Get Monte Carlo equity projection.
-    
+    Get Monte Carlo equity projection from real strategy metrics.
+
+    Reads the best strategy's ``win_rate``, ``sharpe_ratio`` and ``expectancy``
+    from ``data/strategies.db`` via :class:`StrategyAttribution`, then runs
+    a forward Monte Carlo projection with :class:`ReturnProjector`.
+
+    If no performance rows exist in the DB yet (paper trading just started,
+    no backtest persisted), returns zeros with ``data_available: false`` so
+    the dashboard can degrade gracefully instead of showing fake numbers.
+
     Args:
-        days: Number of days to project
-        surplus: Starting surplus capital to project from
+        days: Number of days to project (informational; the projector uses
+            ``horizon_trades`` based on typical trades-per-day).
+        surplus: Starting surplus capital to project from.
     """
+    from src.analysis.attribution import StrategyAttribution
+    from src.analysis.projector import ReturnProjector
+
+    # --- 1. Fetch real strategy metrics from strategies.db ---
+    attribution = StrategyAttribution()
+
+    # Use the best strategy per symbol (by total_pnl, latest only) to pick
+    # the strategy with the strongest historical edge for the projection.
+    win_rate = 0.0
+    sharpe: float | None = None
+    expectancy = 0.0
+    strategy_name: str | None = None
+    data_available = False
+
     try:
-        from src.analysis.projector import ReturnProjector
-        from src.analysis.attribution import StrategyAttribution
-        
-        # Get best performing strategy for projection
-        attribution = StrategyAttribution()
-        best_by_symbol = attribution.get_best_strategy_per_symbol()
-        
-        # Use the strategy with highest Sharpe overall, or default to RangeBreak
-        strategy_metrics = None
-        if best_by_symbol:
-            # Find strategy with highest Sharpe across all symbols
-            best_perf = None
-            best_sharpe = -float('inf')
-            for symbol, perf in best_by_symbol.items():
-                if hasattr(perf, 'sharpe_ratio') and perf.sharpe_ratio > best_sharpe:
-                    best_sharpe = perf.sharpe_ratio
-                    best_perf = perf
-            
-            if best_perf:
-                # Convert performance to projector format
-                from src.analysis.projector import ProjectedMetrics
-                # The projector expects different fields - map what we have
-                # We'll use simplified projection for now
-                pass  # Will use fallback below
-        
-        # For now, use a reasonable default projection based on historical performance
-        # In a real implementation, we'd fetch actual strategy metrics from DB
-        projector = ReturnProjector(
-            win_rate=0.65,  # Placeholder - would come from attribution
-            sharpe=1.8,     # Placeholder - would come from attribution
+        best_per_symbol = attribution.best_strategy_per_symbol(
+            metric="total_pnl", latest_only=True
         )
-        
-        result = projector.project()
-        
-        # Convert to expected format
-        curve_dict = result.curve.to_dict()
-        metrics_dict = result.metrics.to_dict()
-        
+    except Exception:
+        best_per_symbol = {}
+
+    if best_per_symbol:
+        # Pick the best strategy across all symbols by total_pnl.
+        # best_per_symbol: {symbol: (strategy_name, total_pnl)}
+        best_symbol, (strategy_name, best_pnl) = max(
+            best_per_symbol.items(), key=lambda kv: kv[1][1]
+        )
+        _ = best_symbol  # noqa: F841  (kept for log clarity)
+
+        # Fetch full metrics for that strategy×symbol (latest row).
+        try:
+            with attribution._connect() as conn:  # noqa: SLF001
+                row = conn.execute(
+                    """
+                    SELECT sp.win_rate, sp.sharpe, sp.expectancy,
+                           sp.profit_factor, sp.total_trades
+                    FROM strategy_performance sp
+                    JOIN strategies s ON s.id = sp.strategy_id
+                    WHERE s.name = ? AND sp.symbol = ?
+                    ORDER BY sp.backtest_date DESC, sp.id DESC
+                    LIMIT 1
+                    """,
+                    (strategy_name, best_symbol),
+                ).fetchone()
+        except Exception:
+            row = None
+
+        if row is not None:
+            win_rate = float(row["win_rate"] or 0.0)
+            sharpe_val = row["sharpe"]
+            sharpe = float(sharpe_val) if sharpe_val is not None else None
+            expectancy = float(row["expectancy"] or 0.0)
+            # Require meaningful data: at least some trades and a non-zero
+            # win rate, otherwise the projection is meaningless.
+            total_trades = int(row["total_trades"] or 0)
+            if total_trades > 0 and 0.0 < win_rate < 1.0:
+                data_available = True
+
+    # --- 2. No-data case: return zeros with the flag ---
+    if not data_available:
         return with_aliases({
+            "data_available": False,
+            "strategy": strategy_name,
             "config": {
                 "days": days,
                 "surplus": surplus,
-                "seed": result.seed
+            },
+            "metrics_used": {
+                "win_rate": 0.0,
+                "sharpe": 0.0,
+                "expectancy": 0.0,
+            },
+            "projection": {
+                "equity_p5": [],
+                "equity_p50": [],
+                "equity_p95": [],
+                "final_value_p5": 0.0,
+                "final_value_p50": 0.0,
+                "final_value_p95": 0.0,
+                "return_p5": 0.0,
+                "return_p50": 0.0,
+                "return_p95": 0.0,
+                "max_dd_p5": 0.0,
+                "max_dd_p50": 0.0,
+                "max_dd_p95": 0.0,
+                "prob_profit": 0.0,
+                "sharpe_estimate": 0.0,
+            },
+        })
+
+    # --- 3. Run the projection with real metrics ---
+    # ReturnProjector requires win_rate (0-1), sharpe (float|None),
+    # and expectancy (R-multiples) as positional args.
+    # Project `surplus` capital over a horizon proportional to ``days``.
+    horizon_trades = max(10, days * 10)  # ~10 trades/day heuristic
+
+    try:
+        projector = ReturnProjector(
+            win_rate=win_rate,
+            sharpe=sharpe,
+            expectancy=expectancy,
+            horizon_trades=horizon_trades,
+            initial_capital=surplus,
+        )
+        result = projector.project()
+
+        curve_dict = result.curve.to_dict()
+        metrics_dict = result.metrics.to_dict()
+
+        return with_aliases({
+            "data_available": True,
+            "strategy": strategy_name,
+            "config": {
+                "days": days,
+                "surplus": surplus,
+                "seed": result.seed,
+                "horizon_trades": horizon_trades,
+            },
+            "metrics_used": {
+                "win_rate": round(win_rate, 4),
+                "sharpe": round(sharpe, 4) if sharpe is not None else 0.0,
+                "expectancy": round(expectancy, 4),
             },
             "projection": {
                 "equity_p5": [round(x, 2) for x in curve_dict.get("p5", [])],
                 "equity_p50": [round(x, 2) for x in curve_dict.get("p50", [])],
                 "equity_p95": [round(x, 2) for x in curve_dict.get("p95", [])],
-                "final_value_p5": round(metrics_dict.get("final_value_p5", 0.0), 2),
-                "final_value_p50": round(metrics_dict.get("final_value_p50", 0.0), 2),
-                "final_value_p95": round(metrics_dict.get("final_value_p95", 0.0), 2),
-                "return_p5": round(metrics_dict.get("return_p5", 0.0), 2),
-                "return_p50": round(metrics_dict.get("return_p50", 0.0), 2),
-                "return_p95": round(metrics_dict.get("return_p95", 0.0), 2),
-                "max_dd_p5": round(metrics_dict.get("max_drawdown_p5", 0.0), 2),
-                "max_dd_p50": round(metrics_dict.get("max_drawdown_p50", 0.0), 2),
-                "max_dd_p95": round(metrics_dict.get("max_drawdown_p95", 0.0), 2),
-                "prob_profit": round(metrics_dict.get("probability_of_profit", 0.0), 2),
-                "sharpe_estimate": round(metrics_dict.get("sharpe_estimate", 0.0), 2)
-            }
+                "final_value_p5": round(metrics_dict.get("final_equity_p5", 0.0), 2),
+                "final_value_p50": round(metrics_dict.get("final_equity_median", 0.0), 2),
+                "final_value_p95": round(metrics_dict.get("final_equity_p95", 0.0), 2),
+                "return_p5": round(metrics_dict.get("final_return_p5", 0.0) * 100, 2),
+                "return_p50": round(metrics_dict.get("final_return_median", 0.0) * 100, 2),
+                "return_p95": round(metrics_dict.get("final_return_p95", 0.0) * 100, 2),
+                "max_dd_p5": round(metrics_dict.get("max_drawdown_p5", 0.0) * 100, 2),
+                "max_dd_p50": round(metrics_dict.get("max_drawdown_median", 0.0) * 100, 2),
+                "max_dd_p95": round(metrics_dict.get("max_drawdown_p95", 0.0) * 100, 2),
+                "prob_profit": round(metrics_dict.get("p_profitable", 0.0) * 100, 2),
+                "sharpe_estimate": round(metrics_dict.get("sharpe_projected_median", 0.0), 2),
+            },
         })
     except Exception as e:
-        # Fallback mock data for testing
-        import numpy as np
-        np.random.seed(42)
-        n_points = days + 1
-        base = 200.0
-        trend = np.linspace(0, 50, n_points)  # Upward trend
-        noise = np.random.normal(0, 5, n_points)
-        p50 = base + trend + noise
-        p5 = p50 - np.abs(np.random.normal(0, 8, n_points))
-        p95 = p50 + np.abs(np.random.normal(0, 8, n_points))
-        
+        # If the projector fails on real data (e.g. degenerate expectancy),
+        # report the error transparently rather than fabricating mock data.
         return with_aliases({
-            "config": {
-                "days": days,
-                "surplus": surplus,
-                "seed": 42
+            "data_available": False,
+            "strategy": strategy_name,
+            "error": f"Projection failed with real metrics: {e}",
+            "metrics_used": {
+                "win_rate": round(win_rate, 4),
+                "sharpe": round(sharpe, 4) if sharpe is not None else 0.0,
+                "expectancy": round(expectancy, 4),
             },
+            "config": {"days": days, "surplus": surplus},
             "projection": {
-                "equity_p5": [round(x, 2) for x in p5],
-                "equity_p50": [round(x, 2) for x in p50],
-                "equity_p95": [round(x, 2) for x in p95],
-                "final_value_p5": round(float(p5[-1]), 2),
-                "final_value_p50": round(float(p50[-1]), 2),
-                "final_value_p95": round(float(p95[-1]), 2),
-                "return_p5": round(((p5[-1] / 200.0) - 1) * 100, 2),
-                "return_p50": round(((p50[-1] / 200.0) - 1) * 100, 2),
-                "return_p95": round(((p95[-1] / 200.0) - 1) * 100, 2),
-                "max_dd_p5": 15.0,
-                "max_dd_p50": 8.0,
-                "max_dd_p95": 3.0,
-                "prob_profit": 65.0,
-                "sharpe_estimate": 1.8
-            }
+                "equity_p5": [], "equity_p50": [], "equity_p95": [],
+                "final_value_p5": 0.0, "final_value_p50": 0.0, "final_value_p95": 0.0,
+                "return_p5": 0.0, "return_p50": 0.0, "return_p95": 0.0,
+                "max_dd_p5": 0.0, "max_dd_p50": 0.0, "max_dd_p95": 0.0,
+                "prob_profit": 0.0, "sharpe_estimate": 0.0,
+            },
         })
 
 # ---------------------------------------------------------------------------
