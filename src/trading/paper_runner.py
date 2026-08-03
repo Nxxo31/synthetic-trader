@@ -39,7 +39,9 @@ from src.strategies.range_break import RangeBreakStrategy, RangeBreakConfig
 from src.analysis.signal_scorer import SignalScorer
 from src.risk.manager import RiskManager, RiskConfig
 from src.risk.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
+from src.risk.capital_allocator import CapitalAllocator, CapitalAllocatorConfig
 from src.analysis.recommender import Recommender
+from src.trading.strategy_factory import create_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -94,10 +96,12 @@ class PaperTradingEngine:
         symbol: str = "RB100",
         max_trades: int = 30,
         score_threshold: float = SCORE_THRESHOLD,
+        strategy_name: str = "breakout",
     ) -> None:
         self.symbol = symbol
         self.max_trades = max_trades
         self.score_threshold = score_threshold
+        self.strategy_name = strategy_name
 
         # Componentes del sistema
         self.risk_manager = RiskManager(RiskConfig())
@@ -105,6 +109,11 @@ class PaperTradingEngine:
             consecutive_losses_threshold=3,
             daily_drawdown_threshold=0.05,
         ))
+        # Capital Allocator — divide reserva(80%) + superávit(20%)
+        self.allocator = CapitalAllocator(
+            config=CapitalAllocatorConfig(),
+            risk_manager=self.risk_manager,
+        )
         # Telegram notifier (opcional, desde .env)
         from src.notifications.telegram import TelegramNotifier
         self.telegram = TelegramNotifier.from_env()
@@ -116,13 +125,22 @@ class PaperTradingEngine:
         self.last_reset_date = datetime.now(timezone.utc).date()
         self.starting_balance_daily = 10000.0
         self.today_trades: list[dict[str, Any]] = []
+
+        # Multi-strategy via factory — uses create_strategy() registry
         scorer = SignalScorer(entry_threshold=score_threshold)
-        self.strategy = RangeBreakStrategy(
-            symbol=symbol,
-            config=RangeBreakConfig(),
-            signal_scorer=scorer,
-            score_threshold=score_threshold,
-        )
+        if strategy_name == "breakout":
+            self.strategy = RangeBreakStrategy(
+                symbol=symbol,
+                config=RangeBreakConfig(),
+                signal_scorer=scorer,
+                score_threshold=score_threshold,
+            )
+        else:
+            # Factory creates any registered strategy: volatility, confluence,
+            # step_index, drift_boom_crash
+            self.strategy = create_strategy(strategy_name, symbol=symbol)
+            logger.info("Using factory strategy: %s → %s", strategy_name, self.strategy.__class__.__name__)
+
         self.recommender = Recommender(capital=10000.0)
 
         # Estado
@@ -145,6 +163,44 @@ class PaperTradingEngine:
         self.report_dir = Path("reports/paper")
         self.report_dir.mkdir(parents=True, exist_ok=True)
 
+        # Cooldown entre señales para evitar trades duplicados en la misma vela
+        self._last_signal_time: float = 0.0
+        self._signal_cooldown_seconds: float = 120.0  # 2 min entre señales
+        # Timestamp de la última candle procesada para no procesar la misma dos veces
+        self._last_candle_epoch: int = 0
+
+    def _get_min_required_candles(self) -> int:
+        """Get minimum candles required for the current strategy."""
+        if hasattr(self.strategy, 'config'):
+            config = self.strategy.config
+            # Different strategies have different config attribute names
+            if hasattr(config, 'min_channel_ticks'):
+                return config.min_channel_ticks          # RangeBreakStrategy
+            elif hasattr(config, 'min_candles'):
+                return config.min_candles                # VolatilityStrategy, MeanReversionStrategy
+            elif hasattr(config, 'lookback_window'):
+                return config.lookback_window            # Other strategies (if any)
+        return 20  # fallback
+
+
+    def _get_min_required_candles(self) -> int:
+        """Get minimum candles required for the current strategy.
+
+        Different strategies expose different attributes on their config
+        object (min_channel_ticks, min_candles, lookback_window).  This
+        helper normalises them so the trading loop never guesses wrong and
+        crashes on a missing attribute.
+        """
+        if hasattr(self.strategy, 'config'):
+            config = self.strategy.config
+            if hasattr(config, 'min_channel_ticks'):
+                return config.min_channel_ticks          # RangeBreakStrategy
+            elif hasattr(config, 'min_candles'):
+                return config.min_candles                # VolatilityStrategy
+            elif hasattr(config, 'lookback_window'):
+                return config.lookback_window
+        return 20  # safe fallback
+
     async def run(self, client: DerivClient) -> None:
         """Ejecuta paper trading hasta alcanzar max_trades o halt.
 
@@ -152,11 +208,13 @@ class PaperTradingEngine:
             client: DerivClient ya conectado (demo)
         """
         logger.info("=== Paper Trading Start ===")
-        logger.info("Symbol: %s | Max trades: %d | Score threshold: %.2f",
-                     self.symbol, self.max_trades, self.score_threshold)
+        logger.info("Symbol: %s | Strategy: %s | Max trades: %d | Score threshold: %.2f",
+                     self.symbol, self.strategy_name, self.max_trades, self.score_threshold)
 
         # Reset daily risk
         self.risk_manager.reset_daily(self.balance)
+        # Initialize Capital Allocator for the day
+        self.allocator.reset_daily(capital_total=self.balance)
 
         # 1. Warmup: download historical candles
         logger.info("Downloading %d candles for warmup...", WARMUP_CANDLES)
@@ -320,10 +378,19 @@ class PaperTradingEngine:
                    len(self.candles) >= self._get_min_required_candles() + 1:
                     if stale_data:
                         logger.info("Generating signal on STALE data (no live fetch this round)")
-                    signal = self.strategy.generate_signal(self.candles)
 
-                    if signal.type != SignalType.NO_SIGNAL:
-                        await self._execute_signal(client, signal)
+                    # Cooldown check — no ejecutar señal si estamos en cooldown
+                    import time
+                    now_ts = time.time()
+                    if now_ts - self._last_signal_time < self._signal_cooldown_seconds:
+                        remaining = self._signal_cooldown_seconds - (now_ts - self._last_signal_time)
+                        logger.debug("Cooldown activo: %.0fs restantes", remaining)
+                    else:
+                        signal = self.strategy.generate_signal(self.candles)
+
+                        if signal.type != SignalType.NO_SIGNAL:
+                            self._last_signal_time = now_ts
+                            await self._execute_signal(client, signal)
                 else:
                     logger.debug("INSUFFICIENT_CANDLES: have %d, need %d",
                                  len(self.candles) if self.candles is not None else 0,
@@ -466,6 +533,8 @@ class PaperTradingEngine:
             current_balance=self.balance,
             starting_balance=self.starting_balance,
         )
+        # Record P&L in Capital Allocator for surplus tracking
+        self.allocator.record_trade(pnl)
 
         self.trades.append(trade)
         self.today_trades.append(trade.to_dict())  # Track for daily report
@@ -482,52 +551,70 @@ class PaperTradingEngine:
     async def _simulate_paper_trade(
         self, client: DerivClient, signal: Signal, size: float
     ) -> tuple[float, str, float]:
-        """Simula el resultado del paper trade usando candles live.
+        """Simula el resultado del paper trade usando candles LIVE futuras.
 
-        En paper trading real, enviaríamos proposal+buy a Deriv.
-        Para esta implementación de validación, usamos las candles
-        más recientes para estimar el outcome.
+        Espera a que lleguen nuevas candles DESPUÉS de la entrada (no usa
+        candles históricas que ya vio la estrategia). Simula TP/SL/time
+        exit basándose en el precio real que llega via WebSocket.
         """
-        # Fetch next few candles to see if TP or SL was hit
-        fresh = await client.ticks_history(
-            symbol=self.symbol,
-            count=20,
-            style="candles",
-            granularity=CANDLE_GRANULARITY,
-        )
-        candles = fresh.get("candles", [])
+        import time
+        entry_epoch = time.time()
+        max_duration = signal.duration_seconds  # e.g. 900s = 15 min
+        check_interval = 5  # check every 5 seconds
+        elapsed = 0
 
-        max_candles = signal.duration_seconds // CANDLE_GRANULARITY
+        while elapsed < max_duration:
+            try:
+                fresh = await client.ticks_history(
+                    symbol=self.symbol,
+                    count=5,
+                    style="ticks",
+                )
+                ticks = fresh.get("prices", [])
+                if ticks:
+                    # Use the latest tick price
+                    current_price = float(ticks[-1])
+                    
+                    # Update realtime state during trade monitoring
+                    self.balance  # touch
+                    self._write_realtime_state()
 
-        for candle in candles[:max_candles]:
-            high = float(candle["high"])
-            low = float(candle["low"])
-            close = float(candle["close"])
+                    if signal.type == SignalType.LONG:
+                        if current_price <= signal.stop_loss:
+                            pnl = -size * (abs(signal.entry_price - signal.stop_loss) / signal.entry_price)
+                            return pnl, "SL", signal.stop_loss
+                        if current_price >= signal.take_profit:
+                            pnl = size * (abs(signal.take_profit - signal.entry_price) / signal.entry_price)
+                            return pnl, "TP", signal.take_profit
 
-            if signal.type == SignalType.LONG:
-                if low <= signal.stop_loss:
-                    pnl = -size * (abs(signal.entry_price - signal.stop_loss) / signal.entry_price)
-                    return pnl, "SL", signal.stop_loss
-                if high >= signal.take_profit:
-                    pnl = size * (abs(signal.take_profit - signal.entry_price) / signal.entry_price)
-                    return pnl, "TP", signal.take_profit
+                    elif signal.type == SignalType.SHORT:
+                        if current_price >= signal.stop_loss:
+                            pnl = -size * (abs(signal.stop_loss - signal.entry_price) / signal.entry_price)
+                            return pnl, "SL", signal.stop_loss
+                        if current_price <= signal.take_profit:
+                            pnl = size * (abs(signal.entry_price - signal.take_profit) / signal.entry_price)
+                            return pnl, "TP", signal.take_profit
+            except Exception as e:
+                logger.warning("Tick fetch failed during trade simulation: %s", e)
 
-            elif signal.type == SignalType.SHORT:
-                if high >= signal.stop_loss:
-                    pnl = -size * (abs(signal.stop_loss - signal.entry_price) / signal.entry_price)
-                    return pnl, "SL", signal.stop_loss
-                if low <= signal.take_profit:
-                    pnl = size * (abs(signal.entry_price - signal.take_profit) / signal.entry_price)
-                    return pnl, "TP", signal.take_profit
+            await asyncio.sleep(check_interval)
+            elapsed += check_interval
 
-        # Time exit
-        if candles:
-            close = float(candles[-1]["close"])
-            if signal.type == SignalType.LONG:
-                pnl = size * ((close - signal.entry_price) / signal.entry_price)
-            else:
-                pnl = size * ((signal.entry_price - close) / signal.entry_price)
-            return pnl, "TIME", close
+        # Time exit — use current price from latest tick
+        try:
+            fresh = await client.ticks_history(
+                symbol=self.symbol, count=1, style="ticks"
+            )
+            ticks = fresh.get("prices", [])
+            if ticks:
+                close = float(ticks[-1])
+                if signal.type == SignalType.LONG:
+                    pnl = size * ((close - signal.entry_price) / signal.entry_price)
+                else:
+                    pnl = size * ((signal.entry_price - close) / signal.entry_price)
+                return pnl, "TIME", close
+        except Exception:
+            pass
 
         return 0.0, "NO_DATA", signal.entry_price
 
@@ -567,6 +654,8 @@ class PaperTradingEngine:
         report = {
             "mode": "paper",
             "symbol": self.symbol,
+            "strategy_name": self.strategy_name,
+            "strategy_class": self.strategy.__class__.__name__,
             "starting_balance": self.starting_balance,
             "current_balance": self.balance,
             "total_trades": len(self.trades),
@@ -576,6 +665,7 @@ class PaperTradingEngine:
             "total_pnl": round(total_pnl, 4),
             "circuit_breaker_status": self.circuit_breaker.status(),
             "risk_report": self.risk_manager.daily_report(),
+            "allocator_state": self.allocator.get_state(),
             "trades": [t.to_dict() for t in self.trades],
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "score_threshold": self.score_threshold,
@@ -590,23 +680,31 @@ class PaperTradingEngine:
 async def run_paper_trading(
     symbol: str = "RB100",
     max_trades: int = 30,
+    strategy_name: str = "breakout",
 ) -> None:
     """Entry point para paper trading.
 
     Args:
         symbol: Símbolo a tradear
         max_trades: Máximo trades antes de parar
+        strategy_name: Nombre de estrategia (breakout, volatility, confluence,
+                       step_index, drift_boom_crash)
     """
     config = DerivConfig.from_yaml()
     client = DerivClient(config)
 
     try:
-        await client.connect()
+        # Initial connect with a small retry — if the very first OTP request
+        # fails (e.g. transient REST 5xx), we still want to come up rather
+        # than crash the bot on a single hiccup.
+        if not await client.reconnect(max_attempts=3):
+            raise RuntimeError("Initial connection to Deriv failed after 3 attempts")
         logger.info("Connected to Deriv (demo: %s)", config.is_demo)
 
         engine = PaperTradingEngine(
             symbol=symbol,
             max_trades=max_trades,
+            strategy_name=strategy_name,
         )
         await engine.run(client)
 
@@ -627,5 +725,6 @@ if __name__ == "__main__":
 
     sym = sys.argv[1] if len(sys.argv) > 1 else "RB100"
     max_t = int(sys.argv[2]) if len(sys.argv) > 2 else 30
+    strat = sys.argv[3] if len(sys.argv) > 3 else "breakout"
 
-    asyncio.run(run_paper_trading(symbol=sym, max_trades=max_t))
+    asyncio.run(run_paper_trading(symbol=sym, max_trades=max_t, strategy_name=strat))

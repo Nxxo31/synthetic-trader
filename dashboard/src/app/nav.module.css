@@ -1,0 +1,96 @@
+.nav {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  height: 56px;
+  padding: 0 24px;
+  background: #161618;
+  border-bottom: 1px solid #2a2a2e;
+  position: sticky;
+  top: 0;
+  z-index: 50;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+  color: inherit;
+}
+.brandMark {
+  font-family: "Instrument Serif", Georgia, serif;
+  font-size: 22px;
+  font-style: italic;
+  color: #fafafa;
+  line-height: 1;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #1c1c1f;
+  border: 1px solid #2a2a2e;
+  border-radius: 8px;
+}
+.brandMark b { color: #2dd4bf; }
+.brandName {
+  font-size: 14px;
+  font-weight: 600;
+  color: #e4e4e7;
+  letter-spacing: 0.2px;
+}
+@media (max-width: 640px) {
+  .brandName { display: none; }
+}
+
+.list {
+  display: flex;
+  gap: 4px;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.list::-webkit-scrollbar { display: none; }
+
+.link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #71717a;
+  text-decoration: none;
+  transition: color 0.15s ease, background 0.15s ease;
+  white-space: nowrap;
+  min-height: 36px;
+}
+.link:hover { color: #e4e4e7; background: #1c1c1f; }
+.link:focus-visible {
+  outline: 2px solid #818cf8;
+  outline-offset: 2px;
+}
+.active {
+  color: #fafafa;
+  background: #1c1c1f;
+}
+.active::after {
+  content: "";
+  position: absolute;
+}
+
+.icon {
+  font-size: 14px;
+  line-height: 1;
+  color: inherit;
+  opacity: 0.85;
+}
+.active .icon { color: #2dd4bf; }
+
+@media (prefers-reduced-motion: reduce) {
+  .link { transition: none; }
+}

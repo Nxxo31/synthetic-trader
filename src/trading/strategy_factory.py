@@ -10,6 +10,8 @@ Registered strategies:
     - ``"breakout"`` / ``"range_break"`` → :class:`RangeBreakStrategy`
     - ``"volatility"``                 → :class:`VolatilityStrategy`
     - ``"confluence"``                 → :class:`ConfluenceStrategy`
+    - ``"step_index"``                 → :class:`StepIndexStrategy`
+    - ``"drift_boom_crash"``           → :class:`DriftBoomCrashStrategy`
 
 Usage::
 
@@ -26,13 +28,15 @@ from typing import Callable
 from src.strategies.base import Signal, SignalType, Strategy
 from src.strategies.range_break import RangeBreakConfig, RangeBreakStrategy
 from src.strategies.volatility import VolatilityConfig, VolatilityStrategy
+from src.strategies.step_index import StepIndexConfig, StepIndexStrategy
+from src.strategies.drift_boom_crash import DriftBoomCrashConfig, DriftBoomCrashStrategy
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- #
 #  Confluence strategy — combines Breakout + Volatility for confluence entry
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- #
 
 
 class ConfluenceStrategy(Strategy):
@@ -138,9 +142,9 @@ class ConfluenceStrategy(Strategy):
         return round(prob, 4)
 
 
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- #
 #  Registry & factory
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- #
 
 # Type alias for strategy constructor
 StrategyConstructor = Callable[..., Strategy]
@@ -151,6 +155,8 @@ STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
     "range_break": RangeBreakStrategy,
     "volatility": VolatilityStrategy,
     "confluence": ConfluenceStrategy,
+    "step_index": StepIndexStrategy,
+    "drift_boom_crash": DriftBoomCrashStrategy,
 }
 
 # Default config class per strategy type
@@ -159,6 +165,8 @@ _CONFIG_REGISTRY: dict[str, type] = {
     "range_break": RangeBreakConfig,
     "volatility": VolatilityConfig,
     "confluence": type(None),  # Confluence uses sub-strategy defaults
+    "step_index": StepIndexConfig,
+    "drift_boom_crash": DriftBoomCrashConfig,
 }
 
 
@@ -184,7 +192,6 @@ def create_strategy(
 
     Args:
         name:    Strategy name (case-insensitive). Must be in the registry.
-                 Accepts "breakout", "range_break", "volatility", "confluence".
         symbol:  Trading symbol to pass to the strategy.
         **kwargs: Extra arguments forwarded to the strategy constructor.
 

@@ -1,0 +1,82 @@
+[Unit]
+Description=Synthetic Trader — Paper trading 24/7 (supervisor)
+Documentation=https://github.com/sebastian/synthetic-trader
+# Arranca después de red y targets básicos; el bot necesita conectarse a
+# Deriv (api.derivws.com) vía WebSocket, así que requiere red disponible.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# ----- Type & restart policy -------------------------------------------
+Type=simple
+# systemd se encarga de reiniciar el supervisor si muere. El supervisor
+# interno (scripts/paper_247.py) a su vez reinicia el bot con backoff si
+# éste termina (crash, halt del circuit breaker, OOM). Doble capa.
+# ``--max-restarts 0`` = ilimitado: dejamos que systemd (Restart=always)
+# sea el árbitro final del proceso supervisor.
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# ----- Executable -----------------------------------------------------
+# Usa el venv del proyecto si existe; si no, cae al python del sistema.
+# Ajusta la ruta del intérprete si tu instalación difiere.
+WorkingDirectory=/home/sebas/proyectos/synthetic-trader
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=-/home/sebas/proyectos/synthetic-trader/.env
+ExecStart=/home/sebas/proyectos/synthetic-trader/.venv/bin/python scripts/paper_247.py --max-restarts 0 --min-uptime 30 --initial-backoff 5 --max-backoff 600
+
+# Fallback si no hay .venv (descomenta para usar el python del sistema):
+# ExecStart=/usr/bin/python3 scripts/paper_247.py --max-restarts 0 --min-uptime 30
+
+# ----- User & permissions ---------------------------------------------
+# CORRE COMO USUARIO NO-ROOT por seguridad.  El bot no necesita
+# privilegios elevados — solo acceso a su working dir, al .env con el
+# PAT de Deriv (lectura), y a la red.
+User=sebas
+Group=sebas
+
+# Hardening básico de systemd.  Si alguna sanitización rompe la conexión
+# WS al broker (muy raro), comenta una a una para aislar.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/sebas/proyectos/synthetic-trader/logs /home/sebas/proyectos/synthetic-trader/realtime /home/sebas/proyectos/synthetic-trader/reports
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+MemoryDenyWriteExecute=false
+LockPersonality=true
+
+# Network: el bot necesita salida a api.derivws.com:443 (WSS).  No
+# restringimos red aquí porque ProtectSystem no cubre egress y
+# IPAddressDeny podría romper conexiones a Deriv.  Ver doc systemd.resource-control.
+
+# ----- Resource limits -------------------------------------------------
+# Limita memoria y CPU para evitar que un leak del engine tire el host.
+MemoryMax=2G
+MemoryHigh=1500M
+CPUWeight=100
+# Si el proceso consume >90% de una core por 30s, systemd lo mata y
+# reinicia vía Restart=always (catch de hot-loops).
+TasksMax=512
+
+# ----- Logging ---------------------------------------------------------
+# Redirige stdout/stderr del supervisor al journal de systemd.
+# ``scripts/paper_247.py`` también escribe a logs/paper_247.log rotativo.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=synthetic-trader-paper
+
+# ----- Shutdown --------------------------------------------------------
+# Al detener el unit, SIGTERM al supervisor, que reenvía al hijo (bot).
+# Si el bot no termina en 30s, systemd envía SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

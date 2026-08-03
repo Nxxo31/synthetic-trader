@@ -221,11 +221,18 @@ async def main() -> None:
 
         elif mode == "paper":
             from src.trading.paper_runner import run_paper_trading
+            # Accept optional symbol and strategy from CLI args
+            paper_symbol = sys.argv[2] if len(sys.argv) > 2 else "R_100"
+            paper_strategy = sys.argv[3] if len(sys.argv) > 3 else "breakout"
             console.print("[yellow]Starting paper trading on Deriv demo account...[/yellow]")
-            console.print(f"[dim]Symbol: RB100 | Max trades: 30 | Score threshold: 0.50[/dim]")
+            console.print(f"[dim]Symbol: {paper_symbol} | Strategy: {paper_strategy} | Max trades: 30[/dim]")
             console.print("[bold red]Paper trading ONLY — no real money at risk.[/bold red]")
             console.print()
-            await run_paper_trading(symbol="RB100", max_trades=30)
+            await run_paper_trading(
+                symbol=paper_symbol,
+                max_trades=30,
+                strategy_name=paper_strategy,
+            )
 
         else:
             console.print(f"[red]Unknown mode: {mode}[/red]")
