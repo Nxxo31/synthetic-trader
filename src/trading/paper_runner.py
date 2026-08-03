@@ -189,9 +189,20 @@ class PaperTradingEngine:
                 signal_scorer=scorer,
                 score_threshold=score_threshold,
             )
+        elif strategy_name == "volatility":
+            # VolatilityStrategy owns its own score_threshold in config.
+            # previously the runner's score_threshold (0.50 by default) was
+            # NEVER propagated — the strategy used its own default 0.20, so
+            # signals with scores 0.27-0.45 slipped through and produced 8
+            # dead-end NO_DATA trades. Pass it explicitly now.
+            from src.strategies.volatility import VolatilityConfig
+            vol_cfg = VolatilityConfig(score_threshold=score_threshold)
+            self.strategy = create_strategy(
+                strategy_name, symbol=symbol, config=vol_cfg,
+            )
         else:
-            # Factory creates any registered strategy: volatility, confluence,
-            # step_index, drift_boom_crash
+            # Factory creates any registered strategy: confluence,
+            # step_index, drift_boom_crash — they use their own defaults.
             self.strategy = create_strategy(strategy_name, symbol=symbol)
         logger.info(
             "Strategy initialized: %s → %s (symbol=%s, key=%s)",
@@ -613,12 +624,26 @@ class PaperTradingEngine:
         Espera a que lleguen nuevas candles DESPUÉS de la entrada (no usa
         candles históricas que ya vio la estrategia). Simula TP/SL/time
         exit basándose en el precio real que llega via WebSocket.
+
+        Reconnect robustness: if ticks_history returns empty prices or
+        raises for ``MAX_EMPTY_TICK_RETRIES`` consecutive attempts, the
+        WebSocket is almost certainly dead. Reconnect transparently and
+        continue polling. Previously, empty ticks from a dead WS would
+        loop silently for ``max_duration`` seconds and exit with
+        ``NO_DATA`` — producing the entry = exit zombie trades
+        observed on 2026-08-03 (all 8 trades exited at entry with P&L=$0).
         """
         import time
         entry_epoch = time.time()
         max_duration = signal.duration_seconds  # e.g. 900s = 15 min
         check_interval = 5  # check every 5 seconds
         elapsed = 0
+        # Count consecutive empty/failed ticks responses. 3 attempts (15s of
+        # silence) → WS is dead → trigger a reconnect inside the trade
+        # monitoring window. Without this, the monitoring loop would burn
+        # the entire max_duration polling a dead WS, then exit NO_DATA.
+        empty_streak = 0
+        MAX_EMPTY_TICK_RETRIES = 3
 
         while elapsed < max_duration:
             try:
@@ -629,6 +654,7 @@ class PaperTradingEngine:
                 )
                 ticks = fresh.get("prices", [])
                 if ticks:
+                    empty_streak = 0  # reset on success
                     # Use the latest tick price
                     current_price = float(ticks[-1])
                     
@@ -651,8 +677,38 @@ class PaperTradingEngine:
                         if current_price <= signal.take_profit:
                             pnl = size * (abs(signal.entry_price - signal.take_profit) / signal.entry_price)
                             return pnl, "TP", signal.take_profit
+                else:
+                    # Empty prices list → WS may be stale (no ticks pushed).
+                    empty_streak += 1
+                    logger.warning(
+                        "Empty ticks during trade sim (%d/%d) at t=%ds",
+                        empty_streak, MAX_EMPTY_TICK_RETRIES, elapsed,
+                    )
+                    if empty_streak >= MAX_EMPTY_TICK_RETRIES:
+                        logger.warning(
+                            "Trade sim: %d empty ticks in a row — reconnecting WS...",
+                            empty_streak,
+                        )
+                        reconnected = await self._reconnect_or_halt(client)
+                        if not reconnected:
+                            logger.error(
+                                "Reconnect failed during trade sim — "
+                                "exiting position at entry price with NO_DATA"
+                            )
+                            return 0.0, "NO_DATA", signal.entry_price
+                        empty_streak = 0  # reset after reconnect attempt
             except Exception as e:
                 logger.warning("Tick fetch failed during trade simulation: %s", e)
+                empty_streak += 1
+                if empty_streak >= MAX_EMPTY_TICK_RETRIES:
+                    logger.warning(
+                        "Trade sim: %d exceptions in a row — reconnecting WS...",
+                        empty_streak,
+                    )
+                    reconnected = await self._reconnect_or_halt(client)
+                    if not reconnected:
+                        return 0.0, "NO_DATA", signal.entry_price
+                    empty_streak = 0
 
             await asyncio.sleep(check_interval)
             elapsed += check_interval

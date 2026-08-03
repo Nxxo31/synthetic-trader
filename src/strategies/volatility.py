@@ -55,10 +55,17 @@ class VolatilityConfig:
     ema_period: int = 20
     band_multiplier: float = 2.0
     min_candles: int = 30
-    max_duration: int = 600
-    sl_atr_multiplier: float = 1.5
-    tp_atr_multiplier: float = 2.0
-    score_threshold: float = 0.20
+    max_duration: int = 900   # 15 min hold window (R_100 moves fast)
+    sl_atr_multiplier: float = 2.0   # wider SL — 1.5 ATR triggered instant
+                                      # stops on R_100's volatile spikes
+    tp_atr_multiplier: float = 3.0   # 1.5x the SL distance → positive R
+    score_threshold: float = 0.35    # raised from 0.20 — too loose for R_100
+                                      # (score 0.27 signals had NO edge). The
+                                      # paper_runner SCORE_THRESHOLD (0.50
+                                      # default) never applied to Volatility
+                                      # because it was only passed via
+                                      # SignalScorer to RangeBreak. Volatility's
+                                      # own config threshold is the live one.
 
 
 class VolatilityStrategy(Strategy):
