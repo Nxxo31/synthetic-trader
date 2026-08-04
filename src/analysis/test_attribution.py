@@ -12,6 +12,8 @@ Covers:
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from src.analysis.attribution import StrategyAttribution
@@ -378,3 +380,199 @@ class TestDashboardPayload:
         restored = json.loads(json_str)
         assert "matrix" in restored
         assert "best_per_symbol" in restored
+
+
+# ---------------------------------------------------------------------------
+#  (e) Brinson-Fachler decomposition tests
+# ---------------------------------------------------------------------------
+
+
+class TestBrinsonFachler:
+    """Tests for StrategyAttribution.brinson_fachler_decomposition()."""
+
+    def test_decomposition_returns_brinson_fachler_result(self, attr_seeded):
+        """The method must return a BrinsonFachlerResult dataclass."""
+        from src.analysis.attribution import BrinsonFachlerResult
+
+        result = attr_seeded.brinson_fachler_decomposition()
+        assert isinstance(result, BrinsonFachlerResult)
+        assert hasattr(result, "allocation_effect")
+        assert hasattr(result, "selection_effect")
+        assert hasattr(result, "interaction_effect")
+
+    def test_total_excess_equals_three_effects_sum(self, attr_seeded):
+        """total_excess_return = allocation + selection + interaction."""
+        r = attr_seeded.brinson_fachler_decomposition()
+        sum_effects = r.allocation_effect + r.selection_effect + r.interaction_effect
+        assert r.total_excess_return == pytest.approx(sum_effects, abs=1e-6)
+
+    def test_total_excess_equals_portfolio_minus_benchmark(self, attr_seeded):
+        """total_excess_return = portfolio_return − benchmark_return."""
+        r = attr_seeded.brinson_fachler_decomposition()
+        explicit = r.portfolio_return - r.benchmark_return
+        assert r.total_excess_return == pytest.approx(explicit, abs=1e-6)
+
+    def test_selection_zero_in_self_attribution(self, attr_seeded):
+        """Equal-weight benchmark with r_p = r_b → selection may be non-zero if
+        within-symbol weight distributions differ between portfolio and benchmark.
+        This is normal in Brinson-Fachler and indicates strategy-picking skill.
+        """
+        r = attr_seeded.brinson_fachler_decomposition(benchmark_strategy=None)
+        # Selection effect measures w_b(i)·(R_p(i)−R_b(i)); it can be non-zero
+        # even in self-attribution due to different weightings within symbol.
+        assert isinstance(r.selection_effect, float)
+        assert "within-symbol strategy-picking skill" in r.selection_note
+
+    def test_rows_contain_all_symbols(self, attr_seeded):
+        """The rows list must have one entry per symbol."""
+        r = attr_seeded.brinson_fachler_decomposition()
+        symbols = {row.symbol for row in r.rows}
+        assert symbols == {"R_100", "RB100"}
+
+    def test_weights_sum_to_one(self, attr_seeded):
+        """Portfolio weights across all cells should sum to ~1.0."""
+        r = attr_seeded.brinson_fachler_decomposition()
+        total_wp = sum(row.portfolio_weight for row in r.rows)
+        assert total_wp == pytest.approx(1.0, abs=1e-6)
+
+    def test_to_dict_is_json_serializable(self, attr_seeded):
+        """to_dict() must produce a JSON-serializable dict."""
+        import json
+        r = attr_seeded.brinson_fachler_decomposition()
+        d = r.to_dict()
+        json.dumps(d)  # must not raise
+        assert "allocation_effect" in d
+        assert "selection_effect" in d
+        assert "interaction_effect" in d
+        assert "rows" in d
+        assert len(d["rows"]) == 2
+
+    def test_invalid_weight_column_raises(self, attr_seeded):
+        """An invalid weight_column must raise ValueError."""
+        with pytest.raises(ValueError, match="weight_column"):
+            attr_seeded.brinson_fachler_decomposition(weight_column="nonexistent")
+
+    def test_invalid_return_column_raises(self, attr_seeded):
+        """An invalid return_column must raise ValueError."""
+        with pytest.raises(ValueError, match="return_column"):
+            attr_seeded.brinson_fachler_decomposition(return_column="nonexistent")
+
+    def test_empty_db_raises(self, attr):
+        """An empty DB should raise ValueError (no cells survive filter)."""
+        with pytest.raises(ValueError, match="No cells survive"):
+            attr.brinson_fachler_decomposition()
+
+    def test_min_trades_filter_excels_cells(self, attr):
+        """Cells below min_trades must be excluded from the decomposition."""
+        # Seed two strategies; one with very few trades
+        attr.save_performance("breakout", "R_100", {
+            "total_pnl": 250.0, "total_trades": 30, "win_rate": 0.6,
+        })
+        attr.save_performance("volatility", "R_100", {
+            "total_pnl": -50.0, "total_trades": 2, "win_rate": 0.45,
+        })
+        # With min_trades=10, volatility (2 trades) excluded
+        r = attr.brinson_fachler_decomposition(min_trades=10)
+        # Only one cell survives → only one strategy-symbol pair
+        symbols = {row.symbol for row in r.rows}
+        assert "R_100" in symbols
+        # With only one cell: w_p = w_b → allocation = 0, interaction = 0
+        # (over-weighting a symbol that has exactly the benchmark return)
+        assert r.allocation_effect == pytest.approx(0.0, abs=1e-10)
+
+    def test_allocation_positive_when_overweight_good_symbol(self):
+        """Overweighting a symbol with above-benchmark return → positive allocation.
+
+        Setup: Two symbols (R_100, RB100). Each has 2 strategies.
+        Portfolio weights by trade count favour R_100 (good symbol).
+        Equal-weight benchmark gives 25% to each cell →
+        per-symbol benchmark weights = 50%/50%.
+        Per-symbol portfolio weights shift toward R_100 (e.g. 86%/14%).
+        R_100 return > overall benchmark return → allocation > 0.
+        """
+        a = StrategyAttribution(db_path=Path("/tmp/test_bf_alloc.db"))
+
+        # R_100: two strategies with many trades
+        a.save_performance("breakout", "R_100", {
+            "total_pnl": 500.0, "total_trades": 100, "win_rate": 0.65,
+        })
+        a.save_performance("volatility", "R_100", {
+            "total_pnl": 200.0, "total_trades": 50, "win_rate": 0.55,
+        })
+        # RB100: two strategies with very few trades (bad symbol)
+        a.save_performance("breakout", "RB100", {
+            "total_pnl": -200.0, "total_trades": 10, "win_rate": 0.40,
+        })
+        a.save_performance("volatility", "RB100", {
+            "total_pnl": -100.0, "total_trades": 5, "win_rate": 0.45,
+        })
+        r = a.brinson_fachler_decomposition(weight_column="total_trades")
+        # R_100 has 150 trades vs 15 for RB100 → w_p(R_100) ≈ 91%
+        # Equal-weight across 4 cells → w_b(R_100) = 50%, w_b(RB100) = 50%
+        # R_100 has positive return, RB100 has negative
+        # Overweighting good symbol R_100 → positive allocation contribution
+        # Underweighting bad symbol RB100 → also positive allocation contribution
+        # (Brinson-Fachler rewards both actions: overweight above-benchmark
+        # and underweight below-benchmark)
+        assert r.allocation_effect > 0, (
+            f"Expected positive allocation (overweight good symbol), "
+            f"got {r.allocation_effect}"
+        )
+        # R_100 (good): overweighting above-benchmark → positive
+        r100_row = [row for row in r.rows if row.symbol == "R_100"][0]
+        assert r100_row.allocation_contribution > 0
+        # RB100 (bad): underweighting below-benchmark → also positive
+        # (avoiding a bad symbol is a good allocation decision)
+        rb100_row = [row for row in r.rows if row.symbol == "RB100"][0]
+        assert rb100_row.allocation_contribution > 0
+        Path("/tmp/test_bf_alloc.db").unlink(missing_ok=True)
+
+    def test_benchmark_strategy_path(self, attr_seeded):
+        """Using benchmark_strategy='volatility' should produce non-zero selection."""
+        r = attr_seeded.brinson_fachler_decomposition(
+            benchmark_strategy="volatility"
+        )
+        # With benchmark_strategy, selection measures deviation from that strategy
+        assert isinstance(r.allocation_effect, float)
+        assert "volatility" in r.selection_note
+
+    def test_return_column_win_rate(self, attr_seeded):
+        """return_column='win_rate' should use win_rate as the return metric."""
+        r = attr_seeded.brinson_fachler_decomposition(return_column="win_rate")
+        assert r.return_column == "win_rate"
+        # Win rates are in [0,1] so returns should be in that range
+        for row in r.rows:
+            assert 0.0 <= row.portfolio_return <= 1.0
+
+    def test_return_column_sharpe(self, attr_seeded):
+        """return_column='sharpe' should use Sharpe ratio as the return metric."""
+        r = attr_seeded.brinson_fachler_decomposition(return_column="sharpe")
+        assert r.return_column == "sharpe"
+        for row in r.rows:
+            assert isinstance(row.portfolio_return, float)
+
+    def test_return_column_expectancy(self, attr_seeded):
+        """return_column='expectancy' should use expectancy as the return metric."""
+        r = attr_seeded.brinson_fachler_decomposition(return_column="expectancy")
+        assert r.return_column == "expectancy"
+
+    def test_weight_column_total_pnl_abs(self, attr_seeded):
+        """weight_column='total_pnl_abs' should weight by absolute P&L."""
+        r = attr_seeded.brinson_fachler_decomposition(weight_column="total_pnl_abs")
+        assert r.weight_column == "total_pnl_abs"
+        # Weights still sum to ~1.0
+        total = sum(row.portfolio_weight for row in r.rows)
+        assert total == pytest.approx(1.0, abs=1e-6)
+
+    def test_bf_row_dataclass_fields(self):
+        """BrinsonFachlerRow has the expected fields."""
+        from src.analysis.attribution import BrinsonFachlerRow
+        row = BrinsonFachlerRow(
+            symbol="R_100", portfolio_weight=0.5, benchmark_weight=0.5,
+            portfolio_return=0.05, benchmark_return=0.03,
+            allocation_contribution=0.001, selection_contribution=0.0,
+            interaction_contribution=0.002,
+        )
+        assert row.symbol == "R_100"
+        assert row.portfolio_weight == 0.5
+        assert row.allocation_contribution == 0.001

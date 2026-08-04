@@ -596,7 +596,7 @@ async def get_attribution_matrix() -> dict:
     
     return with_aliases(result)
 
-@app.get("/api/attribution/ranking")
+@s.app.get("/api/attribution/ranking")
 async def get_strategy_ranking() -> dict:
     """Get strategies ranked by average Sharpe ratio."""
     from src.analysis.attribution import StrategyAttribution
@@ -613,6 +613,54 @@ async def get_strategy_ranking() -> dict:
         })
     
     return with_aliases({"ranking": result})
+
+# ------------------------------------------------------------------ #
+# Brinson-Fachler Attribution Endpoints
+# ------------------------------------------------------------------ #
+
+@app.get("/api/attribution/brinson")
+async def get_brinson_fachler_decomposition(
+    weight_column: str = "total_trades",
+    return_column: str = "avg_pnl_pct",
+    benchmark_strategy: str | None = None,
+    min_trades: int = 1,
+) -> dict:
+    """
+    Brinson-Fachler performance attribution decomposition.
+    
+    Decomposes excess return into allocation, selection, and interaction effects.
+    
+    Args:
+        weight_column: Column for weights ("total_trades" or "total_pnl_abs")
+        return_column: Column for returns ("avg_pnl_pct", "win_rate", "sharpe", "expectancy")
+        benchmark_strategy: Optional strategy name to use as benchmark within each symbol
+        min_trades: Minimum trades required for a cell to be included
+        
+    Returns:
+        Brinson-Fachler result with three effects and per-symbol breakdown
+    """
+    from fastapi.responses import JSONResponse
+    from src.analysis.attribution import StrategyAttribution
+    
+    attribution = StrategyAttribution()
+    try:
+        result = attribution.brinson_fachler_decomposition(
+            weight_column=weight_column,
+            return_column=return_column,
+            benchmark_strategy=benchmark_strategy,
+            min_trades=min_trades,
+        )
+        return with_aliases(result.to_dict())
+    except ValueError as e:
+        return JSONResponse(
+            status_code=400,
+            content=with_aliases({"error": str(e)})
+        )
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content=with_aliases({"error": f"Internal server error: {str(e)}"})
+        )
 
 # ---------------------------------------------------------------------------
 # Return Projection Endpoints
