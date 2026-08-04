@@ -17,6 +17,16 @@ reports/paper/
 venv/
 .mypy_cache/
 .pytest_cache/
+# Playwright test artifacts
+test-results/
+playwright-report/
+# Logs
+logs/
+# Realtime state (regenerated at runtime)
+realtime/
+# Sketches
+sketches/
+
 
 # Dashboard (Next.js) — formerly broken submodule, now part of repo
 dashboard/node_modules/

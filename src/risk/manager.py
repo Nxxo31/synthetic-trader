@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class RiskConfig:
     """Risk management configuration — NON-NEGOTIABLE."""
-    max_risk_per_trade: float = 0.03       # 3% of capital (aggressive but safe with dual circuit breaker)
+    max_risk_per_trade: float = 0.015      # 1.5% of capital (conservative, validated by research)
     max_daily_drawdown: float = 0.05       # 5% daily loss limit
     max_trades_per_day: int = 8            # Max 8 trades per day
     circuit_breaker_losses: int = 5        # Halt after 5 consecutive losses

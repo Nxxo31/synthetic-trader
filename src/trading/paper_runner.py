@@ -39,14 +39,65 @@ from src.strategies.range_break import RangeBreakStrategy, RangeBreakConfig
 from src.analysis.signal_scorer import SignalScorer
 from src.risk.manager import RiskManager, RiskConfig
 from src.risk.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
+from src.risk.capital_allocator import CapitalAllocator, CapitalAllocatorConfig
 from src.analysis.recommender import Recommender
+from src.trading.strategy_factory import create_strategy
 
 logger = logging.getLogger(__name__)
+
+
+# Symbol-prefix → strategy registry key, used by the ``"auto"`` selector.
+# Keep in sync with ``src/trading/strategy_factory.py`` STRATEGY_REGISTRY.
+#
+# Each instrument family has a strategy that matches its price generation
+# process. Using the wrong strategy (e.g. range-break on a volatility index)
+# produces ZERO signals because the strategy's assumptions don't match the
+# instrument's structure (R_100 follows an Ornstein-Uhlenbeck process; it
+# has no channel support/resistance).
+#
+#   R_100, R_75, R_50, R_25, R_10  → "volatility"  (ATR-band mean reversion)
+#   RB100, RB200                    → "breakout"    (channel breakout)
+#   BOOM*, CRASH*                   → "drift_boom_crash"
+#   STEPT*, STE*                    → "step_index"
+#
+# ``"auto"`` resolves to one of the above based on ``symbol``.  An explicit
+# strategy_name passed in always wins.
+def _auto_resolve_strategy(symbol: str) -> str:
+    """Map a Deriv synthetic symbol to the matching strategy registry key.
+
+    The order of checks matters: ``RB`` must be checked before ``R_`` (both
+    share the ``R`` prefix).  Returns a key that exists in
+    ``STRATEGY_REGISTRY``.
+    """
+    sym = symbol.upper().strip()
+    if sym.startswith("RB"):
+        return "breakout"          # Range Break indices (RB100, RB200)
+    if sym.startswith("R_"):
+        return "volatility"        # Volatility indices (R_10..R_100)
+    if sym.startswith(("BOOM", "CRASH")):
+        return "drift_boom_crash"  # Boom/Crash spike indices
+    if sym.startswith(("STEPT", "STE")):
+        return "step_index"        # Step indices
+    # Unknown family — default to volatility (safest for non-channel indices).
+    logger.warning(
+        "Symbol %s doesn't match a known family; defaulting to volatility "
+        "strategy. Specify strategy_name explicitly to override.",
+        symbol,
+    )
+    return "volatility"
 
 # Cuántas candles históricas para warmup
 WARMUP_CANDLES = 500
 # Threshold del scorer (optimizado en Fase 1)
-SCORE_THRESHOLD = 0.50
+# Originally 0.50 — too high for R_100 VolatilityStrategy in live regime.
+# Per-factor reachability diagnostic on R_100 (see references/
+# score-threshold-reachability-diagnostic-2026-08-02.md) showed live
+# scores cluster 0.27-0.45. A 0.50 threshold filters ALL signals → zero
+# trades. 0.35 lets through real band-touch signals (score 0.37-0.43)
+# while still filtering noise. This default is now propagated to the
+# VolatilityStrategy via explicit VolatilityConfig(score_threshold=...)
+# in the PaperTradingEngine constructor (see code below).
+SCORE_THRESHOLD = 0.35
 # Granularidad de candles (segundos)
 CANDLE_GRANULARITY = 60
 
@@ -54,6 +105,9 @@ CANDLE_GRANULARITY = 60
 REALTIME_STATE_FILE = "/home/sebas/proyectos/synthetic-trader/realtime/paper_state.json"
 EQUITY_FILE = "/home/sebas/proyectos/synthetic-trader/realtime/equity.jsonl"
 TRADES_FILE = "/home/sebas/proyectos/synthetic-trader/realtime/trades.jsonl"
+
+# Consecutive reconnect failures before a clean halt + dashboard alert.
+MAX_RECONNECT_FAILURES_GLOBAL = 5
 
 
 @dataclass
@@ -91,10 +145,20 @@ class PaperTradingEngine:
         symbol: str = "RB100",
         max_trades: int = 30,
         score_threshold: float = SCORE_THRESHOLD,
+        strategy_name: str = "auto",
     ) -> None:
         self.symbol = symbol
         self.max_trades = max_trades
         self.score_threshold = score_threshold
+        # Resolve ``"auto"`` → correct strategy key for this symbol's family.
+        # This is the default: each instrument gets the strategy that matches
+        # its price-generation process (R_100 → volatility, RB100 → range
+        # break, BOOM/CRASH → drift, STEPT → step index).  An explicit
+        # strategy_name passed in is honoured verbatim.
+        if strategy_name == "auto":
+            strategy_name = _auto_resolve_strategy(symbol)
+            logger.info("Auto-resolved strategy: %s → %s", symbol, strategy_name)
+        self.strategy_name = strategy_name
 
         # Componentes del sistema
         self.risk_manager = RiskManager(RiskConfig())
@@ -102,6 +166,11 @@ class PaperTradingEngine:
             consecutive_losses_threshold=3,
             daily_drawdown_threshold=0.05,
         ))
+        # Capital Allocator — divide reserva(80%) + superávit(20%)
+        self.allocator = CapitalAllocator(
+            config=CapitalAllocatorConfig(),
+            risk_manager=self.risk_manager,
+        )
         # Telegram notifier (opcional, desde .env)
         from src.notifications.telegram import TelegramNotifier
         self.telegram = TelegramNotifier.from_env()
@@ -113,13 +182,41 @@ class PaperTradingEngine:
         self.last_reset_date = datetime.now(timezone.utc).date()
         self.starting_balance_daily = 10000.0
         self.today_trades: list[dict[str, Any]] = []
+
+        # Multi-strategy via factory — all strategies (including "breakout")
+        # are created through the same named registry so the runner stays
+        # symbol/strategy-agnostic.  The "auto" default already resolved to a
+        # concrete key above; an explicit strategy_name is passed through
+        # unchanged.  RangeBreak gets the scorer/threshold it expects.
         scorer = SignalScorer(entry_threshold=score_threshold)
-        self.strategy = RangeBreakStrategy(
-            symbol=symbol,
-            config=RangeBreakConfig(),
-            signal_scorer=scorer,
-            score_threshold=score_threshold,
+        if strategy_name == "breakout":
+            self.strategy = create_strategy(
+                strategy_name,
+                symbol=symbol,
+                config=RangeBreakConfig(),
+                signal_scorer=scorer,
+                score_threshold=score_threshold,
+            )
+        elif strategy_name == "volatility":
+            # VolatilityStrategy owns its own score_threshold in config.
+            # previously the runner's score_threshold (0.50 by default) was
+            # NEVER propagated — the strategy used its own default 0.20, so
+            # signals with scores 0.27-0.45 slipped through and produced 8
+            # dead-end NO_DATA trades. Pass it explicitly now.
+            from src.strategies.volatility import VolatilityConfig
+            vol_cfg = VolatilityConfig(score_threshold=score_threshold)
+            self.strategy = create_strategy(
+                strategy_name, symbol=symbol, config=vol_cfg,
+            )
+        else:
+            # Factory creates any registered strategy: confluence,
+            # step_index, drift_boom_crash — they use their own defaults.
+            self.strategy = create_strategy(strategy_name, symbol=symbol)
+        logger.info(
+            "Strategy initialized: %s → %s (symbol=%s, key=%s)",
+            strategy_name, self.strategy.__class__.__name__, symbol, strategy_name,
         )
+
         self.recommender = Recommender(capital=10000.0)
 
         # Estado
@@ -129,10 +226,56 @@ class PaperTradingEngine:
         self.balance: float = 10000.0
         self.starting_balance: float = 10000.0
         self.is_running = False
+        # --- reconnect / stale-data robustness (see _trading_loop) ---
+        # Last known-good candles used when a fetch fails so the strategy
+        # still gets validated data (with stale_data=True flag) instead of
+        # None/empty.  Reduces false NO_SIGNAL on transient WS drops.
+        self._last_valid_candles: pd.DataFrame = pd.DataFrame()
+        # Consecutive failed reconnect attempts.  When this reaches 5 we
+        # halt cleanly and push an alert to the dashboard via paper_state.json.
+        self._reconnect_failures: int = 0
 
         # Reporte
         self.report_dir = Path("reports/paper")
         self.report_dir.mkdir(parents=True, exist_ok=True)
+
+        # Cooldown entre señales para evitar trades duplicados en la misma vela
+        self._last_signal_time: float = 0.0
+        self._signal_cooldown_seconds: float = 120.0  # 2 min entre señales
+        # Timestamp de la última candle procesada para no procesar la misma dos veces
+        self._last_candle_epoch: int = 0
+
+    def _get_min_required_candles(self) -> int:
+        """Get minimum candles required for the current strategy."""
+        if hasattr(self.strategy, 'config'):
+            config = self.strategy.config
+            # Different strategies have different config attribute names
+            if hasattr(config, 'min_channel_ticks'):
+                return config.min_channel_ticks          # RangeBreakStrategy
+            elif hasattr(config, 'min_candles'):
+                return config.min_candles                # VolatilityStrategy, MeanReversionStrategy
+            elif hasattr(config, 'lookback_window'):
+                return config.lookback_window            # Other strategies (if any)
+        return 20  # fallback
+
+
+    def _get_min_required_candles(self) -> int:
+        """Get minimum candles required for the current strategy.
+
+        Different strategies expose different attributes on their config
+        object (min_channel_ticks, min_candles, lookback_window).  This
+        helper normalises them so the trading loop never guesses wrong and
+        crashes on a missing attribute.
+        """
+        if hasattr(self.strategy, 'config'):
+            config = self.strategy.config
+            if hasattr(config, 'min_channel_ticks'):
+                return config.min_channel_ticks          # RangeBreakStrategy
+            elif hasattr(config, 'min_candles'):
+                return config.min_candles                # VolatilityStrategy
+            elif hasattr(config, 'lookback_window'):
+                return config.lookback_window
+        return 20  # safe fallback
 
     async def run(self, client: DerivClient) -> None:
         """Ejecuta paper trading hasta alcanzar max_trades o halt.
@@ -141,11 +284,13 @@ class PaperTradingEngine:
             client: DerivClient ya conectado (demo)
         """
         logger.info("=== Paper Trading Start ===")
-        logger.info("Symbol: %s | Max trades: %d | Score threshold: %.2f",
-                     self.symbol, self.max_trades, self.score_threshold)
+        logger.info("Symbol: %s | Strategy: %s | Max trades: %d | Score threshold: %.2f",
+                     self.symbol, self.strategy_name, self.max_trades, self.score_threshold)
 
         # Reset daily risk
         self.risk_manager.reset_daily(self.balance)
+        # Initialize Capital Allocator for the day
+        self.allocator.reset_daily(capital_total=self.balance)
 
         # 1. Warmup: download historical candles
         logger.info("Downloading %d candles for warmup...", WARMUP_CANDLES)
@@ -191,6 +336,7 @@ class PaperTradingEngine:
             state = {
                 "mode": "paper",
                 "symbol": self.symbol,
+                "strategy": self.strategy_name,  # <-- ADDED
                 "balance": self.balance,
                 "pnl": self.balance - self.starting_balance,
                 "trades_today": len(self.today_trades),
@@ -203,319 +349,14 @@ class PaperTradingEngine:
             os.makedirs(os.path.dirname(REALTIME_STATE_FILE), exist_ok=True)
             with open(REALTIME_STATE_FILE, "w") as f:
                 json.dump(state, f, indent=2)
-                
+
             # Also write equity point for charting
             equity_point = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "equity": self.balance,
-                "pnl": self.balance - self.starting_balance
+                "pnl": self.balance - self.starting_balance,
             }
             with open(EQUITY_FILE, "a") as f:
                 f.write(json.dumps(equity_point) + "\n")
-                
         except Exception as e:
             logger.debug(f"Could not write realtime state: {e}")
-            
-    def _write_realtime_trade(self, trade: dict) -> None:
-        """Write a trade to the trades JSONL file for WebSocket streaming."""
-        try:
-            with open(TRADES_FILE, "a") as f:
-                f.write(json.dumps(trade) + "\n")
-        except Exception as e:
-            logger.debug(f"Could not write realtime trade: {e}")
-
-    async def _trading_loop(self, client: DerivClient) -> None:
-        """Loop principal: acumula candles y genera signals."""
-        tick_count = 0
-        last_candle_time = 0
-        current_candle: dict[str, Any] = {}
-
-        # Subscribe to ticks
-        logger.info("Subscribing to ticks for %s...", self.symbol)
-        tick_response = await client.subscribe_ticks(self.symbol)
-        logger.info("Tick subscription active")
-
-        while self.is_running and len(self.trades) < self.max_trades:
-            # Check daily rollover (generate report if new day UTC)
-            self._check_daily_rollover()
-
-            # Check if we're halted
-            cb_ok, cb_reason = self.circuit_breaker.can_trade()
-            if not cb_ok:
-                logger.warning("Circuit breaker: %s. Waiting 60s...", cb_reason)
-                await asyncio.sleep(60)
-                continue
-
-            # In real implementation, this would process live ticks
-            # For now, we simulate by downloading fresh candles periodically
-            logger.info("Paper trade %d/%d | Balance: $%.2f | P&L: $%.2f",
-                        len(self.trades) + 1, self.max_trades,
-                        self.balance, self.balance - self.starting_balance)
-
-            # Download latest candles
-            try:
-                fresh = await client.ticks_history(
-                    symbol=self.symbol,
-                    count=50,
-                    style="candles",
-                    granularity=CANDLE_GRANULARITY,
-                )
-                new_candles = fresh.get("candles", [])
-                if new_candles:
-                    new_df = pd.DataFrame(new_candles)
-                    new_df["epoch"] = pd.to_numeric(new_df["epoch"])
-                    new_df["datetime"] = pd.to_datetime(new_df["epoch"], unit="s")
-                    # Append to existing candles (deduplicate by epoch)
-                    self.candles = pd.concat([self.candles, new_df]).drop_duplicates(
-                        subset=["epoch"]
-                    ).sort_values("epoch").reset_index(drop=True)
-            except Exception as e:
-                logger.error("Error fetching candles: %s", e)
-                await asyncio.sleep(60)
-                continue
-
-            # Generate signal
-            if len(self.candles) >= self.strategy.config.min_channel_ticks + 1:
-                signal = self.strategy.generate_signal(self.candles)
-
-                if signal.type != SignalType.NO_SIGNAL:
-                    await self._execute_signal(client, signal)
-
-            # Update real-time state file for dashboard/API
-            self._write_realtime_state()
-
-            # Wait before next check (1 minute candle = check every 60s)
-            # Use shorter interval for responsiveness
-            await asyncio.sleep(10)
-
-        self.is_running = False
-        logger.info("Paper trading complete: %d trades executed", len(self.trades))
-
-    async def _execute_signal(self, client: DerivClient, signal: Signal) -> None:
-        """Ejecuta una signal en la cuenta demo."""
-        # Check risk manager
-        can, reason = self.risk_manager.can_trade()
-        if not can:
-            logger.info("Trade skipped: %s", reason)
-            return
-
-        # Calculate position size
-        win_prob = self.strategy.get_win_probability(signal)
-        win_amount = abs(signal.take_profit - signal.entry_price)
-        loss_amount = abs(signal.entry_price - signal.stop_loss)
-
-        # Get ATR ratio from signal metadata for volatility multiplier
-        atr_ratio = signal.metadata.get("atr_ratio", 1.0)
-        vol_mult = 1.0 + max(0.0, (atr_ratio - 1.0))
-
-        size = self.risk_manager.position_size_dynamic(
-            self.balance, win_prob, win_amount, loss_amount,
-            confidence=signal.confidence,
-            volatility_multiplier=vol_mult,
-        )
-
-        if size <= 0:
-            logger.info("No edge — Kelly returned 0")
-            return
-
-        # Generate recommendation
-        rec = self.recommender.generate_recommendation(
-            signal, signal.confidence, size, self.circuit_breaker, self.balance
-        )
-        logger.info("RECOMMENDATION: %s", rec)
-
-        # Create paper trade record
-        trade = PaperTrade(
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            direction=signal.type.value,
-            entry_price=signal.entry_price,
-            stop_loss=signal.stop_loss,
-            take_profit=signal.take_profit,
-            stake=size,
-            confidence=signal.confidence,
-            score=signal.confidence,
-        )
-
-        # In paper trading, we simulate the trade outcome
-        # (in live: send proposal → buy → monitor → sell)
-        # For demo, we use the historical candle data to simulate
-        pnl, exit_reason, exit_price = await self._simulate_paper_trade(
-            client, signal, size
-        )
-
-        trade.pnl = pnl
-        trade.exit_reason = exit_reason
-        trade.exit_price = exit_price
-        trade.status = "WON" if pnl > 0 else "LOST"
-        trade.duration_seconds = 60  # approximate
-
-        self.balance += pnl
-        self.risk_manager.record_trade(pnl, self.balance)
-        self.circuit_breaker.update(
-            loss=pnl < 0,
-            current_balance=self.balance,
-            starting_balance=self.starting_balance,
-        )
-
-        self.trades.append(trade)
-        self.today_trades.append(trade.to_dict())  # Track for daily report
-        self._write_realtime_trade(trade.to_dict())  # Write to realtime trades file
-        logger.info(
-            "Trade #%d: %s %s | Entry: %.2f | Exit: %.2f | P&L: $%.4f | %s",
-            len(self.trades), trade.direction, self.symbol,
-            trade.entry_price, trade.exit_price, pnl, trade.status
-        )
-
-        # Save trade to JSON incrementally
-        self._save_report()
-
-    async def _simulate_paper_trade(
-        self, client: DerivClient, signal: Signal, size: float
-    ) -> tuple[float, str, float]:
-        """Simula el resultado del paper trade usando candles live.
-
-        En paper trading real, enviaríamos proposal+buy a Deriv.
-        Para esta implementación de validación, usamos las candles
-        más recientes para estimar el outcome.
-        """
-        # Fetch next few candles to see if TP or SL was hit
-        fresh = await client.ticks_history(
-            symbol=self.symbol,
-            count=20,
-            style="candles",
-            granularity=CANDLE_GRANULARITY,
-        )
-        candles = fresh.get("candles", [])
-
-        max_candles = signal.duration_seconds // CANDLE_GRANULARITY
-
-        for candle in candles[:max_candles]:
-            high = float(candle["high"])
-            low = float(candle["low"])
-            close = float(candle["close"])
-
-            if signal.type == SignalType.LONG:
-                if low <= signal.stop_loss:
-                    pnl = -size * (abs(signal.entry_price - signal.stop_loss) / signal.entry_price)
-                    return pnl, "SL", signal.stop_loss
-                if high >= signal.take_profit:
-                    pnl = size * (abs(signal.take_profit - signal.entry_price) / signal.entry_price)
-                    return pnl, "TP", signal.take_profit
-
-            elif signal.type == SignalType.SHORT:
-                if high >= signal.stop_loss:
-                    pnl = -size * (abs(signal.stop_loss - signal.entry_price) / signal.entry_price)
-                    return pnl, "SL", signal.stop_loss
-                if low <= signal.take_profit:
-                    pnl = size * (abs(signal.entry_price - signal.take_profit) / signal.entry_price)
-                    return pnl, "TP", signal.take_profit
-
-        # Time exit
-        if candles:
-            close = float(candles[-1]["close"])
-            if signal.type == SignalType.LONG:
-                pnl = size * ((close - signal.entry_price) / signal.entry_price)
-            else:
-                pnl = size * ((signal.entry_price - close) / signal.entry_price)
-            return pnl, "TIME", close
-
-        return 0.0, "NO_DATA", signal.entry_price
-
-    def _check_daily_rollover(self) -> None:
-        """Verifica si cambió el día UTC → genera reporte del día anterior."""
-        now = datetime.now(timezone.utc)
-        today = now.date()
-        if today > self.last_reset_date:
-            logger.info("Nuevo día UTC detectado: %s (anterior: %s)", today, self.last_reset_date)
-            self._generate_daily_report()
-            # Reset daily counters
-            self.last_reset_date = today
-            self.starting_balance_daily = self.balance
-            self.today_trades = []
-
-    def _generate_daily_report(self) -> None:
-        """Genera el reporte diario usando DailyReporter y envía a Telegram."""
-        yesterday = self.last_reset_date.strftime("%Y-%m-%d")
-        logger.info("Generando reporte diario para %s (%d trades)...", yesterday, len(self.today_trades))
-
-        self.daily_reporter.generate_report(
-            date=yesterday,
-            starting_balance=self.starting_balance_daily,
-            ending_balance=self.balance,
-            trades=self.today_trades,
-            circuit_breaker_status=self.circuit_breaker.status(),
-            risk_report=self.risk_manager.daily_report(),
-        )
-
-    def _save_report(self) -> None:
-        """Guarda el reporte de paper trading en JSON."""
-        wins = sum(1 for t in self.trades if t.pnl > 0)
-        losses = len(self.trades) - wins
-        total_pnl = sum(t.pnl for t in self.trades)
-        win_rate = wins / len(self.trades) if self.trades else 0
-
-        report = {
-            "mode": "paper",
-            "symbol": self.symbol,
-            "starting_balance": self.starting_balance,
-            "current_balance": self.balance,
-            "total_trades": len(self.trades),
-            "wins": wins,
-            "losses": losses,
-            "win_rate": round(win_rate, 4),
-            "total_pnl": round(total_pnl, 4),
-            "circuit_breaker_status": self.circuit_breaker.status(),
-            "risk_report": self.risk_manager.daily_report(),
-            "trades": [t.to_dict() for t in self.trades],
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "score_threshold": self.score_threshold,
-        }
-
-        report_file = self.report_dir / "paper_trading_report.json"
-        with open(report_file, "w") as f:
-            json.dump(report, f, indent=2, default=str)
-        logger.info("Paper trading report saved to %s", report_file)
-
-
-async def run_paper_trading(
-    symbol: str = "RB100",
-    max_trades: int = 30,
-) -> None:
-    """Entry point para paper trading.
-
-    Args:
-        symbol: Símbolo a tradear
-        max_trades: Máximo trades antes de parar
-    """
-    config = DerivConfig.from_yaml()
-    client = DerivClient(config)
-
-    try:
-        await client.connect()
-        logger.info("Connected to Deriv (demo: %s)", config.is_demo)
-
-        engine = PaperTradingEngine(
-            symbol=symbol,
-            max_trades=max_trades,
-        )
-        await engine.run(client)
-
-    except KeyboardInterrupt:
-        logger.info("Paper trading interrupted by user")
-    except Exception as e:
-        logger.error("Paper trading error: %s", e)
-        raise
-    finally:
-        await client.disconnect()
-        logger.info("Disconnected from Deriv")
-
-
-if __name__ == "__main__":
-    import sys
-    import logging
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-
-    sym = sys.argv[1] if len(sys.argv) > 1 else "RB100"
-    max_t = int(sys.argv[2]) if len(sys.argv) > 2 else 30
-
-    asyncio.run(run_paper_trading(symbol=sym, max_trades=max_t))

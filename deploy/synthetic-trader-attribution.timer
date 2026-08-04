@@ -1,0 +1,31 @@
+# synthetic-trader-attribution.timer
+#
+# Timer systemd que dispara el servicio de attribution diaria.
+#
+# Se ejecuta una vez al día (por defecto a las 00:00 del timezone del
+# sistema).  ``Persistent=true`` hace que, si el equipo estuvo apagado a
+# esa hora, systemd dispare el timer "perdido" en cuanto el equipo
+# arranque (catch-up).  Útil para VPS/laptops que no están 24/7.
+#
+# Instalación (requiere sudo — no ejecutar desde el agent):
+#
+#   sudo cp deploy/synthetic-trader-attribution.{timer,service} /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now synthetic-trader-attribution.timer
+#   systemctl list-timers synthetic-trader-attribution
+#
+# Para dispararlo manualmente una vez (test):
+#   sudo systemctl start synthetic-trader-attribution.service
+#   journalctl -u synthetic-trader-attribution -e
+
+[Timer]
+# Día a 00:00 (timezone del sistema, normalmente UTC en VPS).
+OnCalendar=daily
+# Si el sistema estuvo apagado a la hora programada, dispara al arrancar
+# (en vez de esperar al día siguiente).  Crítico para atribución diaria.
+Persistent=true
+# Evita solapamiento si la ejecución anterior aún corriendo.
+Unit=synthetic-trader-attribution.service
+
+[Install]
+WantedBy=timers.target
