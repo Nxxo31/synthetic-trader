@@ -9,6 +9,7 @@ the ``STRATEGY_REGISTRY`` dict (or calling :func:`register_strategy``).
 Registered strategies:
     - ``"breakout"`` / ``"range_break"`` → :class:`RangeBreakStrategy`
     - ``"volatility"``                 → :class:`VolatilityStrategy`
+    - ``"volatility_v2"``              → :class:`VolatilityStrategyV2`
     - ``"confluence"``                 → :class:`ConfluenceStrategy`
     - ``"step_index"``                 → :class:`StepIndexStrategy`
     - ``"drift_boom_crash"``           → :class:`DriftBoomCrashStrategy`
@@ -28,6 +29,7 @@ from typing import Callable
 from src.strategies.base import Signal, SignalType, Strategy
 from src.strategies.range_break import RangeBreakConfig, RangeBreakStrategy
 from src.strategies.volatility import VolatilityConfig, VolatilityStrategy
+from src.strategies.volatility_v2 import VolatilityV2Config, VolatilityStrategyV2
 from src.strategies.step_index import StepIndexConfig, StepIndexStrategy
 from src.strategies.drift_boom_crash import DriftBoomCrashConfig, DriftBoomCrashStrategy
 
@@ -154,6 +156,7 @@ STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
     "breakout": RangeBreakStrategy,
     "range_break": RangeBreakStrategy,
     "volatility": VolatilityStrategy,
+    "volatility_v2": VolatilityStrategyV2,
     "confluence": ConfluenceStrategy,
     "step_index": StepIndexStrategy,
     "drift_boom_crash": DriftBoomCrashStrategy,
@@ -164,6 +167,7 @@ _CONFIG_REGISTRY: dict[str, type] = {
     "breakout": RangeBreakConfig,
     "range_break": RangeBreakConfig,
     "volatility": VolatilityConfig,
+    "volatility_v2": VolatilityV2Config,
     "confluence": type(None),  # Confluence uses sub-strategy defaults
     "step_index": StepIndexConfig,
     "drift_boom_crash": DriftBoomCrashConfig,

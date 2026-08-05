@@ -596,7 +596,7 @@ async def get_attribution_matrix() -> dict:
     
     return with_aliases(result)
 
-@s.app.get("/api/attribution/ranking")
+@app.get("/api/attribution/ranking")
 async def get_strategy_ranking() -> dict:
     """Get strategies ranked by average Sharpe ratio."""
     from src.analysis.attribution import StrategyAttribution
