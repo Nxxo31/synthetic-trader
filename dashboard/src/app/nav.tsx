@@ -8,6 +8,7 @@ const ROUTES = [
   { href: '/', label: 'Dashboard', icon: '▦' },
   { href: '/projection', label: 'Proyección Económica', icon: '◈' },
   { href: '/analytics', label: 'Analítica', icon: '📊' },
+  { href: '/backtest', label: 'Backtest', icon: '▣' },
 ] as const;
 
 export default function Nav() {

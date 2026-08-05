@@ -75,6 +75,7 @@ interface TradeRecord {
   exit_reason: string;
   duration_seconds: number;
   status: string;
+  symbol?: string;
   stop_perdida: number;
   objetivo_ganancia: number;
   resultado_operaciones: number;
@@ -410,7 +411,7 @@ export default function AnalyticsPage() {
           <div className={styles.kpiLabel}>Balance</div>
           <div className={styles.kpiValue}>${fmtUSD(botStatus?.balance || 0)}</div>
           <div className={styles.kpiSub}>
-            {botStatus?.pnl !== 0
+            {botStatus && botStatus.pnl !== 0
               ? `${botStatus.pnl >= 0 ? '+' : ''}$${fmtUSD(Math.abs(botStatus.pnl || 0))}`
               : '—'}
           </div>
@@ -422,7 +423,7 @@ export default function AnalyticsPage() {
             {fmtRatio(botStatus?.kpi.indice_sharpe || 0)}
           </div>
           <div className={styles.kpiSub}>
-            {botStatus?.kpi.tasa_aciertos !== 0
+            {botStatus && botStatus.kpi.tasa_aciertos !== 0
               ? `${(botStatus.kpi.tasa_aciertos * 100).toFixed(1)}%`
               : '—'}
           </div>
