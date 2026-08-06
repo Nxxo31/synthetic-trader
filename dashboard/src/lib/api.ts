@@ -7,3 +7,5 @@ export async function fetchAPI<T>(path: string): Promise<T> {
   }
   return response.json();
 }
+
+export { API_URL };

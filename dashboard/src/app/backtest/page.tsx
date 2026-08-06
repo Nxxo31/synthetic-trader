@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useMemo } from 'react';
-import { fetchAPI } from '@/lib/api';
+import { fetchAPI, API_URL } from '@/lib/api';
 import styles from './backtest.module.css';
 import {
   AreaChart,
@@ -99,6 +99,19 @@ export default function BacktestPage() {
   const [report, setReport] = useState<BacktestReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  
+  // Form state for running new backtest
+  const [formData, setFormData] = useState({
+    strategy: '',
+    symbol: '',
+    timeframe: '',
+    startDate: '',
+    endDate: '',
+    initialCapital: ''
+  });
+  const [formLoading, setFormLoading] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [formSuccess, setFormSuccess] = useState<boolean>(false);
 
   // Fetch list of backtest summaries on mount
   useEffect(() => {
@@ -151,6 +164,92 @@ export default function BacktestPage() {
       return { name: `T${i}`, value };
     });
   }, [report]);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    // Validate required fields
+    if (!formData.strategy || !formData.symbol || !formData.timeframe || 
+        !formData.startDate || !formData.endDate || !formData.initialCapital) {
+      setFormError('Por favor complete todos los campos');
+      return;
+    }
+
+    // Validate date range
+    const startDate = new Date(formData.startDate);
+    const endDate = new Date(formData.endDate);
+    const today = new Date();
+    
+    if (startDate > endDate) {
+      setFormError('La fecha de inicio debe ser anterior a la fecha de fin');
+      return;
+    }
+    
+    if (endDate > today) {
+      setFormError('La fecha de fin no puede ser futura');
+      return;
+    }
+
+    setFormLoading(true);
+    setFormError(null);
+    setFormSuccess(false);
+
+    try {
+      const response = await fetch(
+        `${API_URL}/api/backtest/run`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            strategy: formData.strategy,
+            symbol: formData.symbol,
+            timeframe: formData.timeframe,
+            start_date: formData.startDate,
+            end_date: formData.endDate,
+            initial_capital: parseFloat(formData.initialCapital),
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+
+      const result = await response.json();
+
+      // Reset form and show success
+      setFormData({
+        strategy: '',
+        symbol: '',
+        timeframe: '',
+        startDate: '',
+        endDate: '',
+        initialCapital: ''
+      });
+      setFormSuccess(true);
+      
+      // Refresh the summaries list to include the new backtest
+      const fetchSummaries = async () => {
+        try {
+          const data = await fetchAPI<BacktestSummary[]>('/api/backtest/results');
+          if (Array.isArray(data) && data.length > 0) {
+            setSummaries(data);
+            // Select the most recent one (first in the list)
+            setSelectedFile(data[0].filename);
+          }
+        } catch (err) {
+          setError(err instanceof Error ? err.message : 'Error desconocido');
+        }
+      };
+      fetchSummaries();
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Error ejecutando backtest');
+    } finally {
+      setFormLoading(false);
+    }
+  };
 
   if (loading) {
     return <div className={styles.loading}>Cargando reportes de backtest…</div>;
@@ -224,9 +323,181 @@ export default function BacktestPage() {
             ))}
           </select>
         </div>
-      </div>
+        </div>
 
-      {/* KPI Strip — from the selected summary */}
+        {/* Backtest Run Form */}
+        <div className={styles.runFormContainer}>
+          <div className={styles.runFormHeader}>
+            <h2 className={styles.runFormTitle}>Ejecutar Nuevo Backtest</h2>
+            {formSuccess && (
+              <div className={styles.successAlert}>
+                Backtest ejecutado correctamente. Los resultados estarán disponibles en la lista.
+              </div>
+            )}
+            {formLoading && (
+              <div className={styles.loadingAlert}>
+                Ejecutando backtest... Por favor espere.
+              </div>
+            )}
+          </div>
+          <form 
+            onSubmit={handleSubmit} 
+            className={styles.runForm}
+          >
+            <div className={styles.formGrid}>
+              {/* Strategy */}
+              <div className={styles.formGroup}>
+                <label htmlFor="strategy" className={styles.formLabel}>Estrategia</label>
+                <select
+                  id="strategy"
+                  value={formData.strategy}
+                  onChange={(e) => setFormData(prev => ({...prev, strategy: e.target.value}))}
+                  className={styles.formSelect}
+                  required
+                  disabled={formLoading}
+                >
+                  <option value="">Seleccionar estrategia</option>
+                  <option value="ema_crossover">EMA Crossover</option>
+                  <option value="rsi_mean_reversion">RSI Mean Reversion</option>
+                  <option value="breakout">Breakout</option>
+                  <option value="ml_ensemble">ML Ensemble</option>
+                </select>
+              </div>
+            
+              {/* Symbol */}
+              <div className={styles.formGroup}>
+                <label htmlFor="symbol" className={styles.formLabel}>Símbolo</label>
+                <select
+                  id="symbol"
+                  value={formData.symbol}
+                  onChange={(e) => setFormData(prev => ({...prev, symbol: e.target.value}))}
+                  className={styles.formSelect}
+                  required
+                  disabled={formLoading}
+                >
+                  <option value="">Seleccionar símbolo</option>
+                  <option value="R_10">Volatility 10 Index</option>
+                  <option value="R_25">Volatility 25 Index</option>
+                  <option value="R_50">Volatility 50 Index</option>
+                  <option value="R_75">Volatility 75 Index</option>
+                  <option value="R_100">Volatility 100 Index</option>
+                  <option value="BOOM1000">Boom 1000 Index</option>
+                  <option value="CRASH1000">Crash 1000 Index</option>
+                  <option value="STEP Index">Step Index</option>
+                </select>
+              </div>
+            
+              {/* Timeframe */}
+              <div className={styles.formGroup}>
+                <label htmlFor="timeframe" className={styles.formLabel}>Timeframe</label>
+                <select
+                  id="timeframe"
+                  value={formData.timeframe}
+                  onChange={(e) => setFormData(prev => ({...prev, timeframe: e.target.value}))}
+                  className={styles.formSelect}
+                  required
+                  disabled={formLoading}
+                >
+                  <option value="">Seleccionar timeframe</option>
+                  <option value="1m">1 minuto</option>
+                  <option value="5m">5 minutos</option>
+                  <option value="15m">15 minutos</option>
+                  <option value="30m">30 minutos</option>
+                  <option value="1h">1 hora</option>
+                  <option value="4h">4 horas</option>
+                  <option value="1d">1 día</option>
+                </select>
+              </div>
+            
+              {/* Date Range */}
+              <div className={styles.formGroupFull}>
+                <label className={styles.formLabel}>Rango de Fechas</label>
+                <div className={styles.dateRangePicker}>
+                  <div>
+                    <label htmlFor="startDate" className={styles.formLabelSmall}>Desde</label>
+                    <input
+                      id="startDate"
+                      type="date"
+                      value={formData.startDate}
+                      onChange={(e) => setFormData(prev => ({...prev, startDate: e.target.value}))}
+                      className={styles.dateInput}
+                      required
+                      disabled={formLoading}
+                      max={new Date().toISOString().split('T')[0]}
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="endDate" className={styles.formLabelSmall}>Hasta</label>
+                    <input
+                      id="endDate"
+                      type="date"
+                      value={formData.endDate}
+                      onChange={(e) => setFormData(prev => ({...prev, endDate: e.target.value}))}
+                      className={styles.dateInput}
+                      required
+                      disabled={formLoading}
+                      max={new Date().toISOString().split('T')[0]}
+                    />
+                  </div>
+                </div>
+              </div>
+            
+              {/* Initial Capital */}
+              <div className={styles.formGroup}>
+                <label htmlFor="initialCapital" className={styles.formLabel}>Capital Inicial ($)</label>
+                <input
+                  id="initialCapital"
+                  type="number"
+                  value={formData.initialCapital}
+                  onChange={(e) => setFormData(prev => ({...prev, initialCapital: e.target.value}))}
+                  className={styles.numberInput}
+                  min="100"
+                  step="100"
+                  required
+                  disabled={formLoading}
+                  placeholder="Ej: 10000"
+                />
+              </div>
+            </div>
+          
+            <div className={styles.formActions}>
+              <button 
+                type="submit" 
+                className={styles.submitButton}
+                disabled={formLoading || !formData.strategy || !formData.symbol || !formData.timeframe || !formData.startDate || !formData.endDate || !formData.initialCapital}
+              >
+                {formLoading ? 'Ejecutando...' : 'Ejecutar Backtest'}
+              </button>
+              <button 
+                type="button"
+                className={styles.resetButton}
+                onClick={() => {
+                  setFormData({
+                    strategy: '',
+                    symbol: '',
+                    timeframe: '',
+                    startDate: '',
+                    endDate: '',
+                    initialCapital: ''
+                  });
+                  setFormError(null);
+                  setFormSuccess(false);
+                }}
+                disabled={formLoading}
+              >
+                Limpiar
+              </button>
+            </div>
+          
+            {formError && (
+              <div className={styles.errorAlert}>
+                {formError}
+              </div>
+            )}
+          </form>
+        </div>
+
+        {/* KPI Strip — from the selected summary */}
       <div className={styles.kpis}>
         <div
           className={`${styles.kpi} ${
