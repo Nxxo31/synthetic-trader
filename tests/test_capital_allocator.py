@@ -2,12 +2,7 @@
 """Quick integration test for CapitalAllocator + RiskManager."""
 
 import sys
-from pathlib import Path
-
-# Add project root to sys.path so `import src...` works regardless of cwd
-_sys_path = str(Path(__file__).resolve().parent.parent / "src")
-if _sys_path not in sys.path:
-    sys.path.insert(0, _sys_path)
+sys.path.insert(0, '/home/sebas/proyectos/synthetic-trader/src')
 
 from risk.capital_allocator import CapitalAllocator, CapitalAllocatorConfig
 from risk.manager import RiskConfig, RiskManager

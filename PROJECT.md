@@ -639,4 +639,25 @@ drift_boom_crash # DriftBoomCrashStrategy — kraken (post-spike drift)
 
 ---
 
+## 📋 Audit 2026-08-06
+
+### Cambios aplicados
+- **conftest.py** movido de root a `tests/conftest.py` — estaba en raíz, fuera de lugar
+- **integration_test_capital_allocator.py** movido a `tests/test_capital_allocator.py` — renombrado siguiendo convención pytest
+- **AGENTS.md** clarificado: `pytest` es válido para backend Python (no para dashboard Next.js). Tests viven en `tests/`
+- **Inconsistencia testing resuelta**: AGENTS.md prohibía tests (vitest/jest/playwright) pero PROJECT.md planeaba pytest. Ambos ahora alineados: pytest backend ✅, vitest/jest/playwright ❌
+
+### Estado arquitectónico
+- **Arquitectura más madura de los 5 proyectos**: Clean separation src/strategies, src/risk, src/trading, src/analysis + dashboard/ Next.js
+- **68 archivos fuente**, 5 estrategias implementadas, paper trading 24/7 activo
+- **Roadmap 4 meses** (Ago-Dic 2026) detallado y coherente con estado actual
+- **Sin drift crítico** — PROJECT.md ↔ código alineados
+
+### Minor issues restantes
+- `sketches/` físico existe pero ya en .gitignore (no tracked) — cosmético
+- `__pycache__/` físico existe pero ya en .gitignore — cosmético
+
+---
+
 *Generado por SophIA — Sebastian Velasco's autonomous operating system*
+*Audit 2026-08-06: Cleanup de archivos de test, AGENTS.md clarificado, inconsistencia testing resuelta.*
