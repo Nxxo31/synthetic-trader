@@ -28,7 +28,7 @@ Auth: Bearer token (PAT) en headers + Deriv-App-ID header
 
 Flujo de conexión:
   1. POST /trading/v1/options/accounts/{accountId}/otp
-     Headers: Deriv-App-ID, Authorization: Bearer {PAT}
+     Headers: Deriv-App-ID, Authorization: Bearer ***
      → Response: { data: { url: "wss://api.derivws.com/.../ws/demo?otp=xxx" } }
   2. Conectar WebSocket a la URL devuelta (OTP válido 120s, un solo uso)
   3. Enviar JSON: ticks, proposal, buy, sell, etc.
@@ -81,7 +81,8 @@ Phase 4: Live Trading → solo con aprobacion explicita
 10. **Commit gate**: use GitHub MCP tools to create a commit with conventional message (type(scope): description) and push to the current branch.
 11. Next task immediately.
 
-NO vitest, NO jest, NO playwright, NO `tsc --noEmit` directo. Los gates son determinísticos: LSP live_diagnostics + delegate_task review + gitleaks + GitHub commit.
+NO vitest, NO jest, NO playwright CLI, NO `tsc --noEmit` directo. Los gates son determinísticos: LSP live_diagnostics + delegate_task review + gitleaks + GitHub commit.
+**Excepción Python**: `pytest` es válido para el backend Python (no para el dashboard Next.js). Tests viven en `tests/`. Gate: `pytest tests/` pasa.
 NO separate spec files, drift reports, docs/specs/, architecture overviews, or any .md outside PROJECT.md. Everything goes in PROJECT.md.
 
 ## Editing code files
