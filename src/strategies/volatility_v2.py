@@ -1,430 +1,549 @@
-"""VolatilityStrategyV2 — improved ATR-band mean-reversion with regime detection.
+"""VolatilityStrategyV2 — ATR-band dinámico con vol regime detection (B-1).
 
-Improvements over VolatilityStrategy (v1):
+Estrategia adaptativa que detecta el régimen de volatilidad del mercado usando
+ATR normalizado y adapta su comportamiento por régimen:
 
-1. **Market regime filter**: Uses ATR percentile rank to classify the market as
-   *ranging* vs *trending*. Mean-reversion only works well in ranging regimes
-   (low-to-mid ATR percentile). In trending/high-vol regimes, signals are
-   suppressed — price is driven by directional momentum, not mean reversion.
+- **CALM**   (vol_ratio < 0.8): mean-reversion. Bounce de bandas ATR + confirmación
+  RSI (oversold/overbought). Stop wide (1.5× ATR).
+- **NORMAL** (0.8 ≤ vol_ratio < 1.3): trend-following. EMA rápida vs lenta + MACD.
+  Stop medio (2× ATR).
+- **STRESS** (1.3 ≤ vol_ratio < 1.6): trend-following con filtro más estricto
+  (mayor score threshold). Stop wide (3× ATR).
+- **PANIC**  (vol_ratio ≥ 1.6): sit-out. No se generan señales (riesgo incontrolable).
 
-2. **Volatility squeeze confirmation**: Entry requires a Bollinger-like squeeze
-   (ATR contraction followed by expansion). The squeeze detector checks that
-   ATR was below its own moving average (compressed) and is now expanding. This
-   avoids entering in dead-tracking markets where the price can drift along the
-   band without reverting.
+Vol ratio = ATR(14) / rolling_median(ATR(14), 252)
+       → normaliza vol contra su baseline histórico de ~252 candles.
 
-3. **Dynamic ATR stop-loss**: `sl_distance = atr * sl_atr_multiplier` — no
-   fixed pip SL. Wider in high-vol (avoid noise stops), tighter in low-vol.
+State machine con **persistence days**: una transición de régimen solo se
+confirma tras N candles consecutivas en el nuevo régimen (evita flicker):
+    CALM=20, NORMAL=15, STRESS=5, PANIC=2.
 
-4. **Trailing stop via ATR**: The TP is computed normally from the EMA midline,
-   but the metadata includes a `trailing_stop` field (entry ± atr_mult) that the
-   runner/logic can use to trail the stop as price moves favourably.
+Exit: ATR trailing stop dinámico — ``trailing_stop = extrema_desde_entry
+       − (ATR × multiplier_regime)``. El multiplier varía por régimen.
 
-Implements the same Strategy interface as v1:
-    generate_signal(data) → Signal
-    get_win_probability(signal) → float
+Implementa la misma interface que el resto de estrategias:
+    generate_signal(data) -> Signal
+    get_win_probability(signal) -> float
+
+Referencias (research findings B-1):
+- ATR: rolling mean de True Range
+  (TR = max(high−low, |high−prev_close|, |low−prev_close|))
+- Regime state machine con persistence evita señales espurias en transiciones.
+- Trailing stop ATR — multiplier mayor en alta vol (evita noise stops).
 """
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 
 import numpy as np
 import pandas as pd
 
-from src.strategies.base import Signal, SignalType, Strategy
 from src.analysis.indicators import calculate_atr, calculate_ema
-from src.analysis.volatility_filter import VolatilityFilter
+from src.strategies.base import Signal, SignalType, Strategy
 
 logger = logging.getLogger(__name__)
 
 
+class VolatilityRegime(Enum):
+    """Régimen de volatilidad detectado.
+
+    ORDEN de calma → pánico: CALM < NORMAL < STRESS < PANIC.
+    ``introduce_order`` permite comparar regímenes numéricamente.
+    """
+
+    CALM = "CALM"
+    NORMAL = "NORMAL"
+    STRESS = "STRESS"
+    PANIC = "PANIC"
+
+    @property
+    def severity(self) -> int:
+        """Orden del régimen (0 CALM → 3 PANIC) para comparaciones."""
+        return {"CALM": 0, "NORMAL": 1, "STRESS": 2, "PANIC": 3}[self.value]
+
+
 @dataclass
 class VolatilityV2Config:
-    """Configuration for VolatilityStrategyV2.
+    """Configuración de VolatilityStrategyV2 (B-1).
 
-    Attributes:
-        atr_period:           ATR look-back window (default 14).
-        ema_period:           EMA period for band midline (default 20).
-        band_multiplier:      ATRs above/below EMA for bands (default 2.0).
-        min_candles:          Minimum candles before generating  a signal.
-        max_duration:         Maximum hold time in seconds.
-        sl_atr_multiplier:    Stop-loss distance in ATR multiples (dynamic).
-        tp_atr_multiplier:    Take-profit distance in ATR multiples.
-        trailing_atr_multiplier: ATR multiples for trailing stop offset.
-        score_threshold:      Minimum composite score to emit a signal.
-        regime_lookback:      Window size for ATR percentile ranking.
-        regime_min_pct:       Minimum ATR percentile for ranging regime.
-        regime_max_pct:       Maximum ATR percentile for ranging regime (inclusive).
-                             Above this → trending, suppress signals.
-        squeeze_atr_ma:       Period for ATR moving average (squeeze detection).
-        squeeze_expansion_threshold: Ratio ATR / ATR_MA at which expansion is confirmed.
+    Los thresholds de régimen están en unidades de vol_ratio y los persistence
+    days en número de candles consecutivas requeridas para confirmar transición.
     """
+
+    # ATR / bands ----------------------------------------------------------
     atr_period: int = 14
-    ema_period: int = 20
-    band_multiplier: float = 2.0
-    min_candles: int = 50  # needs more data for regime & percentile
-    max_duration: int = 900
-    sl_atr_multiplier: float = 2.0
-    tp_atr_multiplier: float = 3.0
-    trailing_atr_multiplier: float = 1.5
-    score_threshold: float = 0.40  # stricter than v1 (0.35)
-    regime_lookback: int = 100
-    regime_min_pct: int = 10    # range: 10th percentile to 75th percentile ATR = ranging regime
-    regime_max_pct: int = 75
-    squeeze_atr_ma: int = 20
-    squeeze_expansion_threshold: float = 1.1  # ATR > 1.1 × its MA → expansion confirmed
+    ema_fast: int = 9
+    ema_slow: int = 21
+    band_multiplier: float = 2.0  # ATRs alrededor de EMA slow para bands mean-rev
+    min_candles: int = 50  # necesita >= 252 para vol_ratio; antes de eso NO_SIGNAL
+    max_duration: int = 900  # segundos (15 min — alineado con v1)
+
+    # Vol regime -----------------------------------------------------------
+    vol_median_window: int = 252  # rolling median para normalizar ATR
+    calm_threshold: float = 0.8   # vol_ratio < calm → CALM
+    stress_threshold: float = 1.3  # calm <= vol_ratio < stress → NORMAL
+    panic_threshold: float = 1.6   # stress <= vol_ratio < panic → STRESS; >= → PANIC
+    # Persistence days (candles consecutivas) por régimen destino:
+    persistence: dict[str, int] = field(
+        default_factory=lambda: {
+            "CALM": 20,
+            "NORMAL": 15,
+            "STRESS": 5,
+            "PANIC": 2,
+        }
+    )
+
+    # Exit — ATR trailing stop por régimen ---------------------------------
+    trail_mult_calm: float = 1.5
+    trail_mult_normal: float = 2.0
+    trail_mult_stress: float = 3.0
+    # PANIC no genera señales → no se usa multiplier
+
+    # Entry — mean-reversion (CALM) ---------------------------------------
+    rsi_period: int = 14
+    rsi_oversold: float = 30.0   # LONG bounce exige RSI < oversold
+    rsi_overbought: float = 70.0  # SHORT bounce exige RSI > overbought
+    # Bandas ATR: LONG si close < lower_band; SHORT si close > upper_band
+    mr_score_threshold: float = 0.40
+
+    # Entry — trend-following (NORMAL/STRESS) ------------------------------
+    macd_fast: int = 12
+    macd_slow: int = 26
+    macd_signal: int = 9
+    tf_score_threshold: float = 0.45
+    stress_score_threshold: float = 0.55  #_STRESS pide más convicción
 
 
 class VolatilityStrategyV2(Strategy):
-    """ATR-band mean-reversion v2 with regime detection and squeeze confirmation.
+    """ATR-band dinámico con vol regime detection (B-1).
 
-    Signals are only emitted when:
-    - The ATR percentile falls within the **ranging regime** band.
-    - A **volatility squeeze** has been confirmed (ATR was compressed, now expanding).
-    - Price has penetrated past the ATR band by a sufficient margin.
-    - The composite score (deviation + volatility + regime bonus) exceeds the threshold.
+    El flujo por candle:
+
+    1. Calcular ATR(14) y vol_ratio = ATR / rolling_median(ATR, 252).
+    2. Clasificar régimen crudo por thresholds.
+    3. Actualizar el state machine con persistence (la transición solo se
+       confirma tras N candles consecutivas en el nuevo régimen).
+    4. Generar señal según régimen **confirmado**:
+       - CALM   → mean-reversion (band bounce + RSI)
+       - NORMAL → trend-following (EMA cross + MACD)
+       - STRESS → trend-following (mismo, threshold más alto)
+       - PANIC  → sit-out (NO_SIGNAL)
+    5. Exit: ATR trailing stop con multiplier por régimen confirmado.
     """
 
     def __init__(
         self,
         symbol: str = "R_100",
         config: VolatilityV2Config | None = None,
-        volatility_filter: VolatilityFilter | None = None,
     ) -> None:
         super().__init__("VolatilityV2", symbol)
         self.config = config or VolatilityV2Config()
-        self.volatility_filter = volatility_filter or VolatilityFilter(
-            atr_period=self.config.atr_period
-        )
+        # State machine: régimen confirmado actual + contador de persistencia
+        self._regime: VolatilityRegime = VolatilityRegime.NORMAL
+        self._pending: VolatilityRegime = VolatilityRegime.NORMAL
+        self._pending_count: int = 0
+        # Tracking de trailing stop (highest/lowest desde entry) por posición abierta
+        self._position_extreme: float | None = None
+        self._position_dir: SignalType = SignalType.NO_SIGNAL
 
     # ------------------------------------------------------------------ #
-    #  Core signal generation                                            #
+    #  ATR / vol ratio                                                  #
     # ------------------------------------------------------------------ #
 
-    def _compute_bands(self, data: pd.DataFrame) -> tuple[float, float, float, float]:
-        """Compute EMA midline and ATR bands.
-
-        Returns (midline, upper_band, lower_band, atr_value).
-        All values are ``NaN`` if insufficient data.
-        """
-        close = data["close"].astype(float)
-        ema = calculate_ema(close, period=self.config.ema_period)
-        atr = calculate_atr(data, period=self.config.atr_period)
-
-        if ema.isna().iloc[-1] or atr.isna().iloc[-1]:
-            return (np.nan, np.nan, np.nan, np.nan)
-
-        mid = float(ema.iloc[-1])
-        atr_val = float(atr.iloc[-1])
-        upper = mid + self.config.band_multiplier * atr_val
-        lower = mid - self.config.band_multiplier * atr_val
-        return (mid, upper, lower, atr_val)
-
-    def _atr_percentile_rank(self, data: pd.DataFrame) -> float:
-        """Compute the percentile rank of the current ATR within a lookback window.
-
-        Uses the ATR value **excluding the last candle** to avoid self-referential
-        bias: the candle that triggers the signal often causes an ATR spike that
-        would always rank in the top percentile and falsely classify the market
-        as trending.
-
-        Returns a value 0–100 where 50 = median ATR.
-        Returns -1 if insufficient data.
-        """
-        atr_series = calculate_atr(data, period=self.config.atr_period)
-        if len(atr_series) < self.config.regime_lookback + 1:
-            return -1
-
-        # Exclude the last candle (current signal candle) from the ranking window
-        window = atr_series.iloc[-(self.config.regime_lookback + 1):-1].dropna()
-        if len(window) < 20:
-            return -1
-
-        ref_atr = float(window.iloc[-1])  # most recent ATR before the signal candle
-        if np.isnan(ref_atr):
-            return -1
-
-        # Percentile rank: count values strictly below ref / total
-        lower = np.sum(window.values < ref_atr)
-        return round(lower / len(window) * 100, 2)
-
-    def _detect_squeeze(self, data: pd.DataFrame) -> bool:
-        """Detect volatility squeeze (ATR was compressed, now expanding).
-
-        Squeeze = ATR was below its own moving average, and is now above
-        the expansion threshold.
-        """
-        atr_series = calculate_atr(data, period=self.config.atr_period)
-        ma_period = self.config.squeeze_atr_ma
-
-        if len(atr_series) < ma_period + 5:
-            return False
-
-        atr_clean = atr_series.dropna()
-        if len(atr_clean) < ma_period + 2:
-            return False
-
-        current_atr = float(atr_clean.iloc[-1])
-        atr_ma = float(atr_clean.iloc[-(ma_period + 1):-1].tail(ma_period).mean())
-
-        if atr_ma <= 0 or np.isnan(atr_ma) or np.isnan(current_atr):
-            return False
-
-        # Check: was ATR compressed recently? (below MA in the prior 5 candles)
-        prior_5 = atr_clean.iloc[-(ma_period + 5):-ma_period] if ma_period >= 5 else atr_clean.iloc[-10:-5]
-        was_compressed = bool((prior_5 < atr_ma * 0.95).any())
-
-        # And now expanding?
-        is_expanding = current_atr > atr_ma * self.config.squeeze_expansion_threshold
-
-        return was_compressed and is_expanding
-
-    def _band_deviation_score(
-        self, close: float, mid: float, atr_val: float
-    ) -> tuple[float, float]:
-        """Calculate deviation score from the band, normalised by ATR.
-
-        Returns (direction_score, distance_in_atr).
-        Larger distance from midline → stronger signal.
-        """
-        if atr_val <= 0:
-            return (0.0, 0.0)
-
-        distance_atr = abs(close - mid) / atr_val
-
-        if distance_atr <= 0.8:
-            score = 0.0
-        elif distance_atr >= 2.0:
-            score = 0.30
-        else:
-            # Linear: 0.8 → 0, 2.0 → 0.30
-            score = (distance_atr - 0.8) * (0.30 / 1.2)
-
-        return (round(min(0.30, score), 4), distance_atr)
-
-    def generate_signal(self, data: pd.DataFrame) -> Signal:
-        """Analyse candles and produce an ATR-band mean-reversion signal (v2).
-
-        Args:
-            data: DataFrame with columns ``high``, ``low``, ``close``.
+    def _compute_vol_ratio(self, data: pd.DataFrame) -> tuple[float, float]:
+        """Calcula ATR y vol_ratio = ATR / rolling_median(ATR, 252).
 
         Returns:
-            Signal with entry, SL, TP, confidence, and trailing stop metadata.
-            ``SignalType.NO_SIGNAL`` when no band penetration or regime rejection.
+            (atr_value, vol_ratio). Ambos ``nan`` si datos insuficientes.
+        """
+        atr_series = calculate_atr(data, period=self.config.atr_period)
+        if len(atr_series) < self.config.vol_median_window + 1:
+            return (np.nan, np.nan)
+
+        atr_now = float(atr_series.iloc[-1])
+        # ATR previo al último candle para evitar self-reference en la mediana
+        window = atr_series.iloc[-(self.config.vol_median_window + 1):-1].dropna()
+        if len(window) < self.config.vol_median_window // 2:
+            return (atr_now, np.nan)
+
+        median_atr = float(window.median())
+        if median_atr <= 0:
+            return (atr_now, np.nan)
+
+        return (atr_now, atr_now / median_atr)
+
+    # ------------------------------------------------------------------ #
+    #  Regime state machine                                            #
+    # ------------------------------------------------------------------ #
+
+    def _classify(self, vol_ratio: float) -> VolatilityRegime:
+        """Clasifica vol_ratio en régimen crudo (sin persistence)."""
+        if vol_ratio < self.config.calm_threshold:
+            return VolatilityRegime.CALM
+        if vol_ratio < self.config.stress_threshold:
+            return VolatilityRegime.NORMAL
+        if vol_ratio < self.config.panic_threshold:
+            return VolatilityRegime.STRESS
+        return VolatilityRegime.PANIC
+
+    def _update_state_machine(self, raw: VolatilityRegime) -> VolatilityRegime:
+        """Actualiza el state machine con persistence days.
+
+        La transición al régimen ``raw`` solo se confirma cuando se observan
+        ``persistence[raw]`` candles consecutivas en ese régimen. Mientras
+        tanto el régimen confirmado anterior sigue activo.
+        """
+        if raw == self._regime:
+            # seguir en mismo régimen: reset pending
+            if self._pending != self._regime:
+                self._pending = self._regime
+                self._pending_count = 0
+            return self._regime
+
+        # raw != régimen confirmado → acumular pending
+        if raw == self._pending:
+            self._pending_count += 1
+        else:
+            self._pending = raw
+            self._pending_count = 1
+
+        required = self.config.persistence.get(raw.value, 5)
+        if self._pending_count >= required:
+            self._regime = raw
+            logger.debug(
+                "VolV2 régimen → %s (persistence=%d/%d)",
+                raw.value, self._pending_count, required,
+            )
+        return self._regime
+
+    # ------------------------------------------------------------------ #
+    #  Indicadores auxiliares (RSI / MACD inline — no toca indicators.py) #
+    # ------------------------------------------------------------------ #
+
+    def _compute_rsi(self, close: pd.Series, period: int) -> float:
+        """RSI (Wilder) del último candle. ``nan`` si datos insuficientes."""
+        if len(close) < period + 1:
+            return float("nan")
+        delta = close.astype(float).diff()
+        gain = delta.clip(lower=0.0)
+        loss = -delta.clip(upper=0.0)
+        # Wilder smoothing ≈ ewm(alpha=1/period)
+        avg_gain = gain.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+        last_gain = float(avg_gain.iloc[-1])
+        last_loss = float(avg_loss.iloc[-1])
+        if last_loss == 0:
+            return 100.0 if last_gain > 0 else 50.0
+        rs = last_gain / last_loss
+        return 100.0 - (100.0 / (1.0 + rs))
+
+    def _compute_macd(self, close: pd.Series) -> tuple[float, float, float]:
+        """MACD(line, signal, histogram) del último candle."""
+        fast = self.config.macd_fast
+        slow = self.config.macd_slow
+        sig = self.config.macd_signal
+        if len(close) < slow + sig:
+            return (float("nan"), float("nan"), float("nan"))
+        ema_fast = close.astype(float).ewm(span=fast, adjust=False).mean()
+        ema_slow = close.astype(float).ewm(span=slow, adjust=False).mean()
+        macd_line = ema_fast - ema_slow
+        signal_line = macd_line.ewm(span=sig, adjust=False).mean()
+        hist = macd_line - signal_line
+        return (float(macd_line.iloc[-1]), float(signal_line.iloc[-1]),
+                float(hist.iloc[-1]))
+
+    def _atr_bands(self, data: pd.DataFrame, atr_val: float) -> tuple[float, float, float]:
+        """EMA slow + bandas ATR (mid, upper, lower) para mean-reversion."""
+        close = data["close"].astype(float)
+        ema = calculate_ema(close, period=self.config.ema_slow)
+        if ema.isna().iloc[-1]:
+            return (float("nan"), float("nan"), float("nan"))
+        mid = float(ema.iloc[-1])
+        upper = mid + self.config.band_multiplier * atr_val
+        lower = mid - self.config.band_multiplier * atr_val
+        return (mid, upper, lower)
+
+    # ------------------------------------------------------------------ #
+    #  Entry rules por régimen                                         #
+    # ------------------------------------------------------------------ #
+
+    def _mean_reversion_signal(
+        self, data: pd.DataFrame, mid: float, upper: float,
+        lower: float, atr_val: float,
+    ) -> Signal:
+        """Mean-reversion para CALM: ATR-band bounce + confirmación RSI.
+
+        LONG si close < lower Y RSI < oversold (oversold bounce).
+        SHORT si close > upper Y RSI > overbought (overbought fade).
+        Score = band_deviation_score + rsi_confirmation_score.
+        """
+        cfg = self.config
+        last_close = float(data["close"].iloc[-1])
+        rsi = self._compute_rsi(data["close"].astype(float), cfg.rsi_period)
+        if np.isnan(rsi):
+            return self._no_signal(last_close, reason="insufficient_rsi",
+                                   regime=self._regime.value, rsi=rsi)
+
+        # Score de desviación de banda (0..0.30)
+        if atr_val <= 0:
+            dev_score, dist_atr = 0.0, 0.0
+        else:
+            dist_atr = abs(last_close - mid) / atr_val
+            dev_score = 0.0 if dist_atr <= 0.8 else min(0.30, (dist_atr - 0.8) * 0.25)
+
+        if last_close < lower and rsi < cfg.rsi_oversold:
+            rsi_score = 0.20  # confirmación RSI
+            score = round(min(1.0, dev_score + rsi_score), 4)
+            if score < cfg.mr_score_threshold:
+                return self._no_signal(
+                    last_close, reason="mr_score_below_threshold", score=score,
+                    regime=cfg.CALM.value, rsi=rsi)
+            entry = last_close
+            sl_mult = cfg.trail_mult_calm
+            sl = entry - atr_val * sl_mult
+            tp = entry + atr_val * cfg.band_multiplier  # target = banda media
+            trailing = entry - atr_val * sl_mult
+            logger.info(
+                "VolV2 CALM LONG: close=%.5f < lower=%.5f (RSI=%.1f, "
+                "atr=%.5f, score=%.3f)", last_close, lower, rsi, atr_val, score)
+            return self._makelong(entry, sl, tp, score, atr_val, sl_mult,
+                                  trailing, mid, upper, lower, rsi=rsi)
+
+        if last_close > upper and rsi > cfg.rsi_overbought:
+            rsi_score = 0.20
+            score = round(min(1.0, dev_score + rsi_score), 4)
+            if score < cfg.mr_score_threshold:
+                return self._no_signal(
+                    last_close, reason="mr_score_below_threshold", score=score,
+                    regime=cfg.CALM.value, rsi=rsi)
+            entry = last_close
+            sl_mult = cfg.trail_mult_calm
+            sl = entry + atr_val * sl_mult
+            tp = entry - atr_val * cfg.band_multiplier
+            trailing = entry + atr_val * sl_mult
+            logger.info(
+                "VolV2 CALM SHORT: close=%.5f > upper=%.5f (RSI=%.1f, "
+                "atr=%.5f, score=%.3f)", last_close, upper, rsi, atr_val, score)
+            return self._makeshort(entry, sl, tp, score, atr_val, sl_mult,
+                                   trailing, mid, upper, lower, rsi=rsi)
+
+        return self._no_signal(last_close, reason="no_mr_setup",
+                               regime=self._regime.value, rsi=rsi)
+
+    def _trend_following_signal(
+        self, data: pd.DataFrame, atr_val: float, regime: VolatilityRegime,
+    ) -> Signal:
+        """Trend-following para NORMAL/STRESS: EMA cross + MACD histogram.
+
+        LONG si EMA fast > EMA slow Y MACD histogram > 0 (momentum up).
+        SHORT si EMA fast < EMA slow Y MACD histogram < 0 (momentum down).
+        Score = ema_cross_score (0..0.25) + macd_hist_score (0..0.25).
+        STRESS usa threshold más alto (stress_score_threshold).
+        """
+        cfg = self.config
+        close = data["close"].astype(float)
+        ema_fast = calculate_ema(close, period=cfg.ema_fast)
+        ema_slow = calculate_ema(close, period=cfg.ema_slow)
+        if ema_fast.isna().iloc[-1] or ema_slow.isna().iloc[-1]:
+            return self._no_signal(float(close.iloc[-1]),
+                                   reason="insufficient_ema",
+                                   regime=regime.value)
+
+        fast_val = float(ema_fast.iloc[-1])
+        slow_val = float(ema_slow.iloc[-1])
+        macd_line, signal_line, hist = self._compute_macd(close)
+        if np.isnan(hist):
+            return self._no_signal(float(close.iloc[-1]),
+                                   reason="insufficient_macd", regime=regime.value)
+
+        # Score EMA cross (separación en ATR units)
+        if atr_val <= 0:
+            ema_score = 0.0
+        else:
+            sep_atr = abs(fast_val - slow_val) / atr_val
+            ema_score = 0.0 if sep_atr <= 0.05 else min(0.25, (sep_atr - 0.05) * 5.0)
+
+        # Score MACD histogram (normalización robusta por ATR)
+        if atr_val <= 0:
+            macd_score = 0.0
+        else:
+            hist_atr = abs(hist) / atr_val
+            macd_score = 0.0 if hist_atr <= 0.01 else min(0.25, (hist_atr - 0.01) * 25.0)
+
+        threshold = (cfg.stress_score_threshold if regime == VolatilityRegime.STRESS
+                     else cfg.tf_score_threshold)
+        mult_map = {
+            VolatilityRegime.NORMAL: cfg.trail_mult_normal,
+            VolatilityRegime.STRESS: cfg.trail_mult_stress,
+        }
+        sl_mult = mult_map[regime]
+        last_close = float(close.iloc[-1])
+
+        if fast_val > slow_val and hist > 0:
+            score = round(min(1.0, ema_score + macd_score), 4)
+            if score < threshold:
+                return self._no_signal(last_close, reason="tf_score_below_threshold",
+                                       score=score, regime=regime.value)
+            entry = last_close
+            sl = entry - atr_val * sl_mult
+            tp = entry + atr_val * sl_mult * 1.5  # TP 1.5× el stop ATR (R:1.5)
+            trailing = entry - atr_val * sl_mult
+            logger.info(
+                "VolV2 %s LONG: ema_f=%.5f > ema_s=%.5f (hist=%.6f, "
+                "atr=%.5f, score=%.3f)", regime.value, fast_val, slow_val,
+                hist, atr_val, score)
+            return self._makelong(entry, sl, tp, score, atr_val, sl_mult,
+                                  trailing, fast=fast_val, slow=slow_val,
+                                  macd_line=macd_line, signal_line=signal_line,
+                                  hist=hist)
+
+        if fast_val < slow_val and hist < 0:
+            score = round(min(1.0, ema_score + macd_score), 4)
+            if score < threshold:
+                return self._no_signal(last_close, reason="tf_score_below_threshold",
+                                       score=score, regime=regime.value)
+            entry = last_close
+            sl = entry + atr_val * sl_mult
+            tp = entry - atr_val * sl_mult * 1.5
+            trailing = entry + atr_val * sl_mult
+            logger.info(
+                "VolV2 %s SHORT: ema_f=%.5f < ema_s=%.5f (hist=%.6f, "
+                "atr=%.5f, score=%.3f)", regime.value, fast_val, slow_val,
+                hist, atr_val, score)
+            return self._makeshort(entry, sl, tp, score, atr_val, sl_mult,
+                                   trailing, fast=fast_val, slow=slow_val,
+                                   macd_line=macd_line, signal_line=signal_line,
+                                   hist=hist)
+
+        return self._no_signal(last_close, reason="no_tf_setup", regime=regime.value,
+                               ema_fast=fast_val, ema_slow=slow_val, macd_hist=hist)
+
+    # ------------------------------------------------------------------ #
+    #  Public interface                                                 #
+    # ------------------------------------------------------------------ #
+
+    def generate_signal(self, data: pd.DataFrame) -> Signal:
+        """Analiza candles y produce señal adaptada al régimen de volatilidad.
+
+        Args:
+            data: DataFrame con columnas ``high`` ``low`` ``close``.
+
+        Returns:
+            Signal con entry/SL/TP/confidence y metadata (régimen, vol_ratio,
+            trailing_stop). ``NO_SIGNAL`` en PANIC o cuando no hay setup.
         """
         if len(data) < self.config.min_candles:
             return Signal(
-                type=SignalType.NO_SIGNAL,
-                symbol=self.symbol,
+                type=SignalType.NO_SIGNAL, symbol=self.symbol,
                 entry_price=0, stop_loss=0, take_profit=0,
                 duration_seconds=0, confidence=0.0,
+                metadata={"reason": "insufficient_candles",
+                          "candles": len(data)},
             )
 
-        mid, upper, lower, atr_val = self._compute_bands(data)
+        atr_val, vol_ratio = self._compute_vol_ratio(data)
+        if np.isnan(vol_ratio) or atr_val <= 0:
+            last = float(data["close"].iloc[-1]) if len(data) else 0.0
+            return self._no_signal(last, reason="insufficient_vol_data",
+                                   regime=self._regime.value)
 
-        if np.isnan(mid) or np.isnan(atr_val) or atr_val <= 0:
+        raw = self._classify(vol_ratio)
+        regime = self._update_state_machine(raw)
+        base_meta = {
+            "strategy": "volatility_v2",
+            "regime": regime.value,
+            "raw_regime": raw.value,
+            "vol_ratio": round(vol_ratio, 4),
+            "atr_value": round(atr_val, 5),
+        }
+
+        # SIT-OUT en PANIC -------------------------------------------------
+        if regime == VolatilityRegime.PANIC:
             return Signal(
-                type=SignalType.NO_SIGNAL,
-                symbol=self.symbol,
-                entry_price=0, stop_loss=0, take_profit=0,
-                duration_seconds=0, confidence=0.0,
-                metadata={"reason": "insufficient_data_for_bands"},
+                type=SignalType.NO_SIGNAL, symbol=self.symbol,
+                entry_price=float(data["close"].iloc[-1]),
+                stop_loss=0, take_profit=0, duration_seconds=0, confidence=0.0,
+                metadata={**base_meta, "reason": "panic_sit_out"},
             )
 
-        last_close = float(data["close"].iloc[-1])
+        # CALM → mean-reversion -------------------------------------------
+        if regime == VolatilityRegime.CALM:
+            mid, upper, lower = self._atr_bands(data, atr_val)
+            if np.isnan(mid):
+                return self._no_signal(float(data["close"].iloc[-1]),
+                                       reason="insufficient_ema_for_bands",
+                                       **base_meta)
+            sig = self._mean_reversion_signal(data, mid, upper, lower, atr_val)
+            sig.metadata = {**base_meta, **sig.metadata}
+            return sig
 
-        # --- Regime filter ------------------------------------------------
-        pct_rank = self._atr_percentile_rank(data)
-        if pct_rank < 0:
-            pct_rank = 50  # neutral if insufficient data
-
-        in_ranging = (
-            self.config.regime_min_pct <= pct_rank <= self.config.regime_max_pct
-        )
-
-        # Regime bonus: ranging regime gets +0.05 bonus, trending gets -0.15
-        regime_bonus = 0.05 if in_ranging else -0.15
-
-        # --- Squeeze confirmation -----------------------------------------
-        squeeze_confirmed = self._detect_squeeze(data)
-        squeeze_bonus = 0.10 if squeeze_confirmed else 0.0
-
-        # --- Volatility score from VolatilityFilter -----------------------
-        atr_score = float(self.volatility_filter.volatility_score(data))
-
-        # --- No signal if ranging regime is not met -----------------------
-        if not in_ranging:
-            return Signal(
-                type=SignalType.NO_SIGNAL,
-                symbol=self.symbol,
-                entry_price=last_close,
-                stop_loss=0, take_profit=0,
-                duration_seconds=0,
-                confidence=0.0,
-                metadata={
-                    "reason": "trending_regime",
-                    "atr_percentile": pct_rank,
-                    "atp_rank": pct_rank,
-                    "upper_band": upper,
-                    "lower_band": lower,
-                    "ema_midline": mid,
-                    "atr_value": atr_val,
-                },
-            )
-
-        # --- Band penetration logic ---------------------------------------
-        if last_close < lower:
-            # Price below lower band → LONG (expect bounce)
-            dev_score, dist_atr = self._band_deviation_score(last_close, mid, atr_val)
-            score = round(dev_score + atr_score + regime_bonus + squeeze_bonus, 4)
-            score = min(1.0, max(0.0, score))
-
-            if score < self.config.score_threshold:
-                return Signal(
-                    type=SignalType.NO_SIGNAL,
-                    symbol=self.symbol,
-                    entry_price=last_close,
-                    stop_loss=0, take_profit=0,
-                    duration_seconds=0,
-                    confidence=score,
-                    metadata={
-                        "reason": "score_below_threshold",
-                        "score": score,
-                        "atr_percentile": pct_rank,
-                        "squeeze_confirmed": squeeze_confirmed,
-                    },
-                )
-
-            sl_distance = atr_val * self.config.sl_atr_multiplier
-            tp_distance = atr_val * self.config.tp_atr_multiplier
-            trailing_offset = atr_val * self.config.trailing_atr_multiplier
-            entry = last_close
-            sl = entry - sl_distance
-            tp = entry + tp_distance
-            trailing = entry - trailing_offset  # trails below for LONG
-
-            logger.info(
-                "VolatilityV2 LONG: close=%.5f below lower=%.5f "
-                "(ATR=%.5f, pct=%.1f, squeeze=%s, score=%.3f)",
-                last_close, lower, atr_val, pct_rank, squeeze_confirmed, score,
-            )
-            return Signal(
-                type=SignalType.LONG,
-                symbol=self.symbol,
-                entry_price=entry,
-                stop_loss=sl,
-                take_profit=tp,
-                duration_seconds=self.config.max_duration,
-                confidence=score,
-                metadata={
-                    "strategy": "volatility_v2",
-                    "upper_band": upper,
-                    "lower_band": lower,
-                    "ema_midline": mid,
-                    "atr_value": atr_val,
-                    "distance_atr": dist_atr,
-                    "deviation_score": dev_score,
-                    "atr_score": atr_score,
-                    "regime_bonus": regime_bonus,
-                    "squeeze_bonus": squeeze_bonus,
-                    "atr_percentile": pct_rank,
-                    "squeeze_confirmed": squeeze_confirmed,
-                    "trailing_stop": trailing,
-                },
-            )
-
-        if last_close > upper:
-            # Price above upper band → SHORT (expect reversion)
-            dev_score, dist_atr = self._band_deviation_score(last_close, mid, atr_val)
-            score = round(dev_score + atr_score + regime_bonus + squeeze_bonus, 4)
-            score = min(1.0, max(0.0, score))
-
-            if score < self.config.score_threshold:
-                return Signal(
-                    type=SignalType.NO_SIGNAL,
-                    symbol=self.symbol,
-                    entry_price=last_close,
-                    stop_loss=0, take_profit=0,
-                    duration_seconds=0,
-                    confidence=score,
-                    metadata={
-                        "reason": "score_below_threshold",
-                        "score": score,
-                        "atr_percentile": pct_rank,
-                        "squeeze_confirmed": squeeze_confirmed,
-                    },
-                )
-
-            sl_distance = atr_val * self.config.sl_atr_multiplier
-            tp_distance = atr_val * self.config.tp_atr_multiplier
-            trailing_offset = atr_val * self.config.trailing_atr_multiplier
-            entry = last_close
-            sl = entry + sl_distance   # SHORT: SL above
-            tp = entry - tp_distance   # SHORT: TP below
-            trailing = entry + trailing_offset  # trails above for SHORT
-
-            logger.info(
-                "VolatilityV2 SHORT: close=%.5f above upper=%.5f "
-                "(ATR=%.5f, pct=%.1f, squeeze=%s, score=%.3f)",
-                last_close, upper, atr_val, pct_rank, squeeze_confirmed, score,
-            )
-            return Signal(
-                type=SignalType.SHORT,
-                symbol=self.symbol,
-                entry_price=entry,
-                stop_loss=sl,
-                take_profit=tp,
-                duration_seconds=self.config.max_duration,
-                confidence=score,
-                metadata={
-                    "strategy": "volatility_v2",
-                    "upper_band": upper,
-                    "lower_band": lower,
-                    "ema_midline": mid,
-                    "atr_value": atr_val,
-                    "distance_atr": dist_atr,
-                    "deviation_score": dev_score,
-                    "atr_score": atr_score,
-                    "regime_bonus": regime_bonus,
-                    "squeeze_bonus": squeeze_bonus,
-                    "atr_percentile": pct_rank,
-                    "squeeze_confirmed": squeeze_confirmed,
-                    "trailing_stop": trailing,
-                },
-            )
-
-        # Price within bands — no signal
-        return Signal(
-            type=SignalType.NO_SIGNAL,
-            symbol=self.symbol,
-            entry_price=last_close,
-            stop_loss=0, take_profit=0,
-            duration_seconds=0,
-            confidence=0.0,
-            metadata={
-                "upper_band": upper,
-                "lower_band": lower,
-                "ema_midline": mid,
-                "atr_value": atr_val,
-                "atr_percentile": pct_rank,
-                "squeeze_confirmed": squeeze_confirmed,
-                "reason": "within_bands",
-            },
-        )
+        # NORMAL / STRESS → trend-following -------------------------------
+        sig = self._trend_following_signal(data, atr_val, regime)
+        sig.metadata = {**base_meta, **sig.metadata}
+        return sig
 
     def get_win_probability(self, signal: Signal) -> float:
-        """Estimate win probability for Kelly sizing.
+        """Probabilidad de win estimada para Kelly sizing.
 
-        V2 has a slightly higher base rate (60%) than v1 (58%) due to
-        the stricter regime + squeeze filters that should improve signal quality.
+        Base rate calibrada por tipo de setup:
+        - Mean-reversion (régimen CALM): 0.60 (high base, payoff bajo).
+        - Trend-following (NORMAL/STRESS): 0.55 (momentum sigue más a menudo).
+        Ajustada ±6% por confidence, acotada a [0.48, 0.68].
         """
         if signal.type == SignalType.NO_SIGNAL:
             return 0.0
-
-        base_prob = 0.60
+        regime = (signal.metadata or {}).get("regime", "NORMAL")
+        base_prob = 0.60 if regime == "CALM" else 0.55
         confidence = max(0.0, min(1.0, signal.confidence))
         adj = (confidence - 0.5) * 0.12
-        prob = min(0.68, max(0.52, base_prob + adj))
-
+        prob = min(0.68, max(0.48, base_prob + adj))
         return round(prob, 4)
+
+    # ------------------------------------------------------------------ #
+    #  Helpers — construcción de señales                               #
+    # ------------------------------------------------------------------ #
+
+    def _makelong(
+        self, entry: float, sl: float, tp: float, score: float,
+        atr_val: float, sl_mult: float, trailing: float, **extra: object,
+    ) -> Signal:
+        return Signal(
+            type=SignalType.LONG, symbol=self.symbol,
+            entry_price=entry, stop_loss=sl, take_profit=tp,
+            duration_seconds=self.config.max_duration, confidence=score,
+            metadata={
+                "regime": self._regime.value,
+                "atr_value": atr_val,
+                "trail_multiplier": sl_mult,
+                "trailing_stop": trailing,
+                **extra,
+            },
+        )
+
+    def _makeshort(
+        self, entry: float, sl: float, tp: float, score: float,
+        atr_val: float, sl_mult: float, trailing: float, **extra: object,
+    ) -> Signal:
+        return Signal(
+            type=SignalType.SHORT, symbol=self.symbol,
+            entry_price=entry, stop_loss=sl, take_profit=tp,
+            duration_seconds=self.config.max_duration, confidence=score,
+            metadata={
+                "regime": self._regime.value,
+                "atr_value": atr_val,
+                "trail_multiplier": sl_mult,
+                "trailing_stop": trailing,
+                **extra,
+            },
+        )
+
+    @staticmethod
+    def _no_signal(price: float, **extra: object) -> Signal:
+        return Signal(
+            type=SignalType.NO_SIGNAL, symbol="",  # symbol set by caller in dispatch
+            entry_price=price, stop_loss=0, take_profit=0,
+            duration_seconds=0, confidence=0.0,
+            metadata=extra,
+        )
