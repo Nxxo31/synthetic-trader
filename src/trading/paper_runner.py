@@ -360,3 +360,64 @@ class PaperTradingEngine:
                 f.write(json.dumps(equity_point) + "\n")
         except Exception as e:
             logger.debug(f"Could not write realtime state: {e}")
+
+# ─── Process-level entry point (consumed by ``src/main.py``) ───────────────────
+#
+# ``main.py`` historically imported a standalone ``run_paper_trading`` coroutine
+# from this module. The engine was refactored into ``PaperTradingEngine.run`` but
+# the convenience wrapper was never (re)added, so ``python -m src.main paper``
+# crashed with ``ImportError: cannot import name 'run_paper_trading'`` and the
+# 24/7 supervisor (``scripts/paper_247.py``) fell into a crash-loop. This wrapper
+# restores the contract: build a ``DerivClient`` from the project config, connect,
+# run the engine, and disconnect cleanly. The supervisor then restarts on exit.
+
+
+async def run_paper_trading(
+    symbol: str = "RB100",
+    max_trades: int = 30,
+    strategy_name: str = "auto",
+) -> None:
+    """Run a paper-trading session on the Deriv demo account.
+
+    Builds a :class:`DerivClient` from ``DerivConfig.from_yaml()`` (which reads
+    ``.env``/``secrets.yaml``), connects, instantiates a
+    :class:`PaperTradingEngine` for ``(symbol, max_trades, strategy_name)``,
+    runs it to completion (max trades, circuit-breaker halt, or WS loss), and
+    disconnects the client. Re-raises any error after attempting a clean
+    disconnect.
+
+    Args:
+        symbol: Deriv synthetic symbol to trade (default ``"RB100"``).
+        max_trades: Stop after this many trades (default 30).
+        strategy_name: Strategy registry key (``breakout``, ``volatility``,
+            ``confluence``, ``step_index``, ``drift_boom_crash``) or
+            ``"auto"`` to resolve from the symbol's instrument family.
+    """
+    config = DerivConfig.from_yaml()
+    client = DerivClient(config)
+    engine = PaperTradingEngine(
+        symbol=symbol,
+        max_trades=max_trades,
+        strategy_name=strategy_name,
+    )
+    try:
+        await client.connect()
+        logger.info("Paper trading client connected (account=%s)", config.account_id)
+        await engine.run(client)
+    except Exception:
+        logger.exception("Paper trading session failed; disconnecting client.")
+        raise
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            logger.debug("Client disconnect raised during cleanup; ignoring.", exc_info=True)
+
+
+__all__ = [
+    "PaperTrade",
+    "PaperTradingEngine",
+    "run_paper_trading",
+    "_auto_resolve_strategy",
+]
+
