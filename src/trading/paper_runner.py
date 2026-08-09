@@ -333,10 +333,14 @@ class PaperTradingEngine:
     def _write_realtime_state(self) -> None:
         """Write current state to a JSON file for the API/dashboard to read."""
         try:
+            # Defensive: ``strategy_name`` may be unset on minimal sub-engines
+            # constructed via ``__new__`` (see test_paper_runner.py); fall back
+            # to the symbol so the field is always present in the JSON.
+            strategy_name = getattr(self, "strategy_name", None) or self.symbol
             state = {
                 "mode": "paper",
                 "symbol": self.symbol,
-                "strategy": self.strategy_name,  # <-- ADDED
+                "strategy": strategy_name,
                 "balance": self.balance,
                 "pnl": self.balance - self.starting_balance,
                 "trades_today": len(self.today_trades),
@@ -360,6 +364,25 @@ class PaperTradingEngine:
                 f.write(json.dumps(equity_point) + "\n")
         except Exception as e:
             logger.debug(f"Could not write realtime state: {e}")
+
+    def _write_realtime_trade(self, trade: dict[str, Any]) -> None:
+        """Append a single trade record to ``realtime/trades.jsonl``.
+
+        Each invocation appends one JSON object per line (JSON Lines format)
+        so the WebSocket and ``/api/bot/trades`` endpoints can tail the file.
+        Idempotent in the sense of ordering-only: callers are responsible
+        for not double-writing the same trade.
+
+        Args:
+            trade: Trade dict (must be JSON-serializable). Typical keys:
+                timestamp, direction, entry_price, exit_price, pnl, stake.
+        """
+        try:
+            os.makedirs(os.path.dirname(TRADES_FILE), exist_ok=True)
+            with open(TRADES_FILE, "a") as f:
+                f.write(json.dumps(trade, default=str) + "\n")
+        except Exception as e:
+            logger.debug(f"Could not write realtime trade: {e}")
 
 # ─── Process-level entry point (consumed by ``src/main.py``) ───────────────────
 #

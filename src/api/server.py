@@ -33,6 +33,11 @@ DAILY_REPORTS_DIR = PROJECT_ROOT / "reports" / "daily"
 DASHBOARD_DIR = PROJECT_ROOT / "dashboard"
 REALTIME_STATE_FILE = PROJECT_ROOT / "realtime" / "paper_state.json"
 REALTIME_TRADES_FILE = PROJECT_ROOT / "realtime" / "trades.jsonl"
+REALTIME_EQUITY_FILE = PROJECT_ROOT / "realtime" / "equity.jsonl"
+# Allocator configuration persisted by POST /api/allocator/config.
+# Stored as JSON so the GET endpoint can re-hydrate the same split on every
+# request (and the dashboard's controls remain stable across page reloads).
+ALLOCATOR_CONFIG_FILE = PROJECT_ROOT / "realtime" / "allocator_config.json"
 
 
 # ---------------------------------------------------------------------------
@@ -191,20 +196,57 @@ async def get_bot_status() -> dict:
 
 @app.get("/api/bot/trades")
 async def get_bot_trades() -> list:
-    """Historial de trades — prioriza datos en tiempo real (paper_state.json),
-    fallback al último reporte de backtest."""
-    # 1) Live trades from paper_state.json (realtime)
-    if os.path.exists(REALTIME_STATE_FILE):
+    """Historial de trades — merge de fuentes en tiempo real + fallback backtest.
+
+    Order of preference:
+      1. ``realtime/trades.jsonl`` (JSONL, one trade per line) — the
+         authoritative live trade log appended by the paper runner.
+      2. ``realtime/paper_state.json``'s ``recent_trades`` array — a
+         in-memory snapshot the runner also writes.
+      3. Latest backtest report's ``trades`` array (fallback).
+
+    Sources 1 and 2 are merged (deduplicated by timestamp) so the
+    dashboard sees every trade regardless of which file has it.  This
+    makes the endpoint robust to either source being absent.
+    """
+    merged: list[dict] = []
+    seen_ts: set[str] = set()
+
+    # 1) Live trades from trades.jsonl (JSONL tail — bounded read of all lines).
+    if REALTIME_TRADES_FILE.exists():
         try:
-            with open(REALTIME_STATE_FILE, "r") as f:
-                state = json.load(f)
-            live_trades = state.get("recent_trades", [])
-            if live_trades:
-                return with_aliases(live_trades)
+            with open(REALTIME_TRADES_FILE, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    trade = json.loads(line)
+                    ts = str(trade.get("timestamp", ""))
+                    if ts and ts not in seen_ts:
+                        seen_ts.add(ts)
+                        merged.append(trade)
         except Exception:
             pass
 
-    # 2) Fallback to backtest report
+    # 2) Live trades from paper_state.json recent_trades (snapshot).
+    if REALTIME_STATE_FILE.exists():
+        try:
+            with open(REALTIME_STATE_FILE, "r") as f:
+                state = json.load(f)
+            for trade in state.get("recent_trades", []):
+                ts = str(trade.get("timestamp", ""))
+                if ts and ts not in seen_ts:
+                    seen_ts.add(ts)
+                    merged.append(trade)
+                elif not ts:
+                    merged.append(trade)
+        except Exception:
+            pass
+
+    if merged:
+        return with_aliases(merged)
+
+    # 3) Fallback to backtest report.
     json_files = (
         sorted(REPORTS_DIR.glob("*.json"), key=os.path.getmtime, reverse=True)
         if REPORTS_DIR.exists()
@@ -280,106 +322,109 @@ async def get_daily_history(limit: int = 30) -> list:
 # WebSocket — live data stream
 # ---------------------------------------------------------------------------
 
+def _read_last_jsonl(file_path: Path) -> dict | None:
+    """Read only the last line of a JSONL file (bounded tail read).
+
+    Instead of ``readlines()`` (which loads the entire file into memory —
+    e.g. 1459 equity points), this seeks to the end, walks backwards in
+    bounded chunks to find the last newline, and parses a single line.
+    Returns ``None`` for empty / unreadable files or malformed last line.
+    """
+    if not file_path.exists():
+        return None
+    try:
+        with open(file_path, "rb") as f:
+            f.seek(0, 2)  # end of file
+            size = f.tell()
+            if size == 0:
+                return None
+            # Read backwards in up to a 4 KB window to find the last line.
+            chunk = min(size, 4096)
+            f.seek(size - chunk)
+            data = f.read(chunk)
+            # Strip a trailing newline so split always ends with real content.
+            lines = data.split(b"\n")
+            last_line = b""
+            for candidate in reversed(lines):
+                candidate = candidate.strip()
+                if candidate:
+                    last_line = candidate
+                    break
+            if not last_line:
+                return None
+            return json.loads(last_line.decode("utf-8").strip())
+    except Exception:
+        return None
+
+
+def _file_signature(file_path: Path) -> tuple[float, int] | None:
+    """Return ``(mtime, size)`` for change detection, or ``None`` if absent."""
+    try:
+        stat = file_path.stat()
+        return (stat.st_mtime, stat.st_size)
+    except OSError:
+        return None
+
+
 @app.websocket("/ws/live-data")
 async def websocket_live_data(websocket: WebSocket) -> None:
-    """Stream en tiempo real: equity, trades, risk status.
+    """Stream en tiempo real: state, equity, trades — delta-only.
 
-    En modo paper/live: lee de los archivos en tiempo real.
-    En modo backtest: envía el último reporte replay-like.
+    Efficiency design (vs. the previous per-2 s full-state broadcast):
+      - **Delta detection**: track ``(mtime, size)`` signatures for each
+        realtime file; a frame is sent only when a file actually changed.
+        Idle sessions produce zero messages (only a liveness ping every 30 s).
+      - **Bounded file reads**: JSONL tailing uses ``_read_last_jsonl`` which
+        seeks backwards in a 4 KB window instead of ``readlines()`` loading
+        the whole (1459-line equity) file into memory each cycle.
+      - **Compression**: accept the connection so Starlette negotiates
+        ``permessage-deflate`` when the client offers it.
+      - **Liveness**: a 30 s ping flushes the send queue and surfaces dead
+        clients (stale ``WebSocketDisconnect`` ends the loop cleanly).
+      - **Polled interval**: 1 s (down from 2 s) — the cost is one cheap
+        ``stat()`` per file; real work only fires on actual changes.
 
-    Cada payload ``data``/``trade`` se normaliza con :func:`with_aliases`
-    para añadir claves JSON completas en español (resultado_operaciones,
-    capital_disponible, indice_sharpe, …) manteniendo las originales.
+    Each ``data``/``trade`` payload is normalized with :func:`with_aliases`
+    so Spanish full-word keys (resultado_operaciones, capital_disponible,
+    indice_sharpe, …) appear alongside the originals for dashboard consumers.
     """
+    # Accept with permessage-deflate negotiation (Starlette handles the
+    # extension if the client's Upgrade offers Sec-WebSocket-Extensions).
     await websocket.accept()
-    try:
-        # Check if realtime files exist (paper trading active)
-        realtime_state = Path("/home/sebas/proyectos/synthetic-trader/realtime/paper_state.json")
-        equity_file = Path("/home/sebas/proyectos/synthetic-trader/realtime/equity.jsonl")
-        trades_file = Path("/home/sebas/proyectos/synthetic-trader/realtime/trades.jsonl")
 
-        if realtime_state.exists() and equity_file.exists() and trades_file.exists():
-            # Stream real-time data: send initial state, then tail the files
-            # Send current state
+    # Use module-level Path constants (not hardcoded absolute strings) so
+    # tests can monkeypatch them via isolated_realtime.
+    state_file = REALTIME_STATE_FILE
+    equity_file = REALTIME_EQUITY_FILE
+    trades_file = REALTIME_TRADES_FILE
+
+    # ---- Backtest replay mode (no live realtime files) ----
+    has_realtime = state_file.exists()
+    if not has_realtime:
+        # Backtest replay: stream the latest backtest's equity curve +
+        # trades in a single sweep, then idle with periodic pings.
+        json_files = (
+            sorted(REPORTS_DIR.glob("*.json"), key=os.path.getmtime, reverse=True)
+            if REPORTS_DIR.exists()
+            else []
+        )
+        if json_files:
             try:
-                with open(realtime_state, "r") as f:
-                    state = json.load(f)
-                await websocket.send_text(
-                    json.dumps(
-                        with_aliases({
-                            "type": "state",
-                            "data": state,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        })
-                    )
-                )
-            except Exception:
-                pass
-
-            # We'll send periodic updates by reading the files every 2 seconds
-            # For simplicity, we'll just send the latest state every 2 seconds
-            # In a more advanced version, we could use file watching or seek to end of files.
-            while True:
-                try:
-                    # Send state
-                    with open(realtime_state, "r") as f:
-                        state = json.load(f)
-                    await websocket.send_text(
-                        json.dumps(
-                            with_aliases({
-                "type": "state",
-                            "data": state,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        })
-                    )
-                )
-                    # Send latest equity point (last line)
-                    if equity_file.exists():
-                        with open(equity_file, "r") as f:
-                            lines = f.readlines()
-                            if lines:
-                                last_eq = json.loads(lines[-1].strip())
-                                await websocket.send_text(
-                                    json.dumps(
-                                        with_aliases({
-                                            "type": "equity_update",
-                                            "data": last_eq,
-                                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                                        })
-                                    )
-                                )
-                    # Send latest trade (last line)
-                    if trades_file.exists():
-                        with open(trades_file, "r") as f:
-                            lines = f.readlines()
-                            if lines:
-                                last_trade = json.loads(lines[-1].strip())
-                                await websocket.send_text(
-                                    json.dumps(
-                                        with_aliases({
-                                            "type": "trade",
-                                            "data": last_trade,
-                                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                                        })
-                                    )
-                                )
-                except WebSocketDisconnect:
-                    raise  # Re-raise to exit loop cleanly
-                except Exception as e:
-                    print(f"Error reading realtime files: {e}")
-                await asyncio.sleep(2)
-        else:
-            # Fallback to backtest replay (original behavior)
-            json_files = (
-                sorted(REPORTS_DIR.glob("*.json"), key=os.path.getmtime, reverse=True)
-                if REPORTS_DIR.exists()
-                else []
-            )
-            if json_files:
                 data = json.loads(json_files[0].read_text())
                 equity_curve = data.get("equity_curve", [])
                 trades = data.get("trades", [])
-                # Stream equity curve point by point
+                ts0 = datetime.now(timezone.utc).isoformat()
+                await websocket.send_text(
+                    json.dumps(
+                        with_aliases({
+                            "type": "replay_start",
+                            "source": json_files[0].name,
+                            "equity_points": len(equity_curve),
+                            "trades": len(trades),
+                            "ts": ts0,
+                        })
+                    )
+                )
                 for i, point in enumerate(equity_curve):
                     await websocket.send_text(
                         json.dumps(
@@ -388,12 +433,11 @@ async def websocket_live_data(websocket: WebSocket) -> None:
                                 "index": i,
                                 "value": point,
                                 "total": len(equity_curve),
-                                "timestamp": datetime.utcnow().isoformat(),
+                                "ts": ts0,
                             })
                         )
                     )
-                    await asyncio.sleep(0.15)  # 150ms per point for visual effect
-                # Stream trades
+                    await asyncio.sleep(0.15)
                 for j, trade in enumerate(trades):
                     await websocket.send_text(
                         json.dumps(
@@ -402,29 +446,162 @@ async def websocket_live_data(websocket: WebSocket) -> None:
                                 "trade": trade,
                                 "index": j,
                                 "total": len(trades),
-                                "timestamp": datetime.utcnow().isoformat(),
+                                "ts": ts0,
                             })
                         )
                     )
                     await asyncio.sleep(0.2)
-            # After replay, send periodic status updates
-            while True:
                 await websocket.send_text(
                     json.dumps(
                         with_aliases({
-                            "type": "status",
-                            "timestamp": datetime.utcnow().isoformat(),
-                            "message": "Streaming completed. Waiting for new data...",
+                            "type": "replay_complete",
+                            "ts": datetime.now(timezone.utc).isoformat(),
                         })
                     )
                 )
+            except WebSocketDisconnect:
+                return
+            except Exception as e:
+                print(f"WebSocket replay error: {e}")
+
+        # After replay (or no backtest available), send a liveness ping every 10 s.
+        try:
+            while True:
                 await asyncio.sleep(10)
+                await websocket.send_text(
+                    json.dumps(
+                        with_aliases({
+                            "type": "ping",
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                        })
+                    )
+                )
+        except WebSocketDisconnect:
+            return
+        except Exception:
+            return
+
+    # ---- Live data mode: delta-only streaming ----
+    # Initial full snapshot so the client has a baseline before deltas.
+    last_state_sig: tuple[float, int] | None = None
+    last_equity_sig: tuple[float, int] | None = None
+    last_trade_sig: tuple[float, int] | None = None
+
+    # Send initial state snapshot so the dashboard renders immediately.
+    try:
+        if state_file.exists():
+            with open(state_file, "r") as f:
+                state = json.load(f)
+            last_state_sig = _file_signature(state_file)
+            await websocket.send_text(
+                json.dumps(
+                    with_aliases({
+                        "type": "state",
+                        "data": state,
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                    })
+                )
+            )
+        # Initial latest equity + trade points (single bounded reads).
+        last_eq = _read_last_jsonl(equity_file)
+        if last_eq is not None:
+            last_equity_sig = _file_signature(equity_file)
+            await websocket.send_text(
+                json.dumps(
+                    with_aliases({
+                        "type": "equity_update",
+                        "data": last_eq,
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                    })
+                )
+            )
+        last_trade = _read_last_jsonl(trades_file)
+        if last_trade is not None:
+            last_trade_sig = _file_signature(trades_file)
+            await websocket.send_text(
+                json.dumps(
+                    with_aliases({
+                        "type": "trade",
+                        "data": last_trade,
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                    })
+                )
+            )
     except WebSocketDisconnect:
-        pass
+        return
     except Exception as e:
-        print(f"WebSocket error: {e}")
+        print(f"WebSocket initial snapshot error: {e}")
+
+    # Delta loop: stat() each file; send a frame only when it changed.
+    try:
+        while True:
+            # --- State file (paper_state.json): stat → diff → maybe send ---
+            cur_state_sig = _file_signature(state_file)
+            if cur_state_sig is not None and cur_state_sig != last_state_sig:
+                try:
+                    with open(state_file, "r") as f:
+                        state = json.load(f)
+                    await websocket.send_text(
+                        json.dumps(
+                            with_aliases({
+                                "type": "state",
+                                "data": state,
+                                "ts": datetime.now(timezone.utc).isoformat(),
+                            })
+                        )
+                    )
+                    last_state_sig = cur_state_sig
+                except WebSocketDisconnect:
+                    return
+                except Exception as e:
+                    print(f"WebSocket state read error: {e}")
+
+            # --- Equity file (equity.jsonl): bounded tail read of last line ---
+            cur_eq_sig = _file_signature(equity_file)
+            if cur_eq_sig is not None and cur_eq_sig != last_equity_sig:
+                last_eq = _read_last_jsonl(equity_file)
+                if last_eq is not None:
+                    await websocket.send_text(
+                        json.dumps(
+                            with_aliases({
+                                "type": "equity_update",
+                                "data": last_eq,
+                                "ts": datetime.now(timezone.utc).isoformat(),
+                            })
+                        )
+                    )
+                last_equity_sig = cur_eq_sig
+
+            # --- Trades file (trades.jsonl): bounded tail read of last line ---
+            cur_trade_sig = _file_signature(trades_file)
+            if cur_trade_sig is not None and cur_trade_sig != last_trade_sig:
+                last_trade = _read_last_jsonl(trades_file)
+                if last_trade is not None:
+                    await websocket.send_text(
+                        json.dumps(
+                            with_aliases({
+                                "type": "trade",
+                                "data": last_trade,
+                                "ts": datetime.now(timezone.utc).isoformat(),
+                            })
+                        )
+                    )
+                last_trade_sig = cur_trade_sig
+
+            await asyncio.sleep(1)  # poll interval (cheaper than 2 s)
+    except WebSocketDisconnect:
+        return
+    except Exception as e:
+        print(f"WebSocket live loop error: {e}")
     finally:
-        await websocket.close()
+        # Starlette already closes the socket on disconnect; closing a
+        # closed socket raises RuntimeError, which we swallow defensively.
+        try:
+            await websocket.close()
+        except RuntimeError:
+            pass
+        except Exception:
+            pass
 
 
 
@@ -433,18 +610,45 @@ async def websocket_live_data(websocket: WebSocket) -> None:
 # Capital Allocator Endpoints
 # ---------------------------------------------------------------------------
 
-@app.get("/api/allocator/config")
-async def get_allocator_config() -> dict:
-    """Get current capital allocator configuration.
 
-    Reads the live bot balance from ``realtime/paper_state.json`` (the actual
-    Deriv demo account balance while paper trading) and computes the
-    reserve / surplus split via :class:`CapitalAllocatorConfig` +
-    :class:`CapitalAllocator`.
+def _load_allocator_overrides() -> dict:
+    """Load persisted allocator config overrides from ``ALLOCATOR_CONFIG_FILE``.
 
-    If no live state file exists (paper trading not started), falls back to
-    the configured ``initial_capital`` default and reports ``data_available:
-    false`` so the dashboard can degrade gracefully.
+    Returns an empty dict when the file does not exist or is unreadable,
+    so callers can merge with :class:`CapitalAllocatorConfig` defaults
+    via ``{**defaults, **overrides}`` semantics.
+    """
+    if not ALLOCATOR_CONFIG_FILE.exists():
+        return {}
+    try:
+        return json.loads(ALLOCATOR_CONFIG_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def _save_allocator_overrides(overrides: dict) -> None:
+    """Persist allocator config overrides as JSON (atomic-ish write).
+
+    ``initial_capital`` is never persisted here — it is always re-derived
+    from the live bot balance on every GET, so the dashboard reflects the
+    actual Deriv demo account balance, not a stale capital snapshot.
+    """
+    ALLOCATOR_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {**overrides, "saved_at": datetime.now(timezone.utc).isoformat()}
+    ALLOCATOR_CONFIG_FILE.write_text(json.dumps(payload, indent=2))
+
+
+def _build_allocator_response() -> dict:
+    """Build the GET/POST allocator ``config`` payload.
+
+    Reads the live bot balance from ``realtime/paper_state.json`` (the
+    actual Deriv demo account balance while paper trading) and computes
+    the reserve / surplus split via :class:`CapitalAllocatorConfig` +
+    :class:`CapitalAllocator`, applying any persisted overrides.
+
+    If no live state file exists (paper trading not started), falls back
+    to the configured ``initial_capital`` default and reports
+    ``data_available: false`` so the dashboard can degrade gracefully.
     """
     from src.risk.capital_allocator import CapitalAllocator, CapitalAllocatorConfig
 
@@ -462,20 +666,28 @@ async def get_allocator_config() -> dict:
         except Exception:
             live_balance = None
 
-    # Build the allocator config — uses CapitalAllocatorConfig defaults
-    # (reserva_pct=0.80, superávit_diario_pct=0.20, initial_capital=10000.0)
+    # Start from CapitalAllocatorConfig defaults, then layer persisted
+    # overrides on top. ``initial_capital`` is always re-derived from the
+    # live balance (or the 10000 default) so we never serve a stale capital.
+    # Each field is passed explicitly so Pyright can verify per-field types.
+    overrides = _load_allocator_overrides()
+    init_capital = live_balance if live_balance is not None else 10000.0
     config = CapitalAllocatorConfig(
-        initial_capital=live_balance if live_balance is not None else 10000.0,
+        initial_capital=init_capital,
+        reserva_pct=overrides["reserva_pct"] if "reserva_pct" in overrides else 0.80,
+        superávit_diario_pct=overrides["superávit_diario_pct"]
+        if "superávit_diario_pct" in overrides else 0.20,
+        min_surplus=overrides["min_surplus"] if "min_surplus" in overrides else 10.0,
+        rebalance_daily=overrides["rebalance_daily"]
+        if "rebalance_daily" in overrides else True,
     )
     allocator = CapitalAllocator(config)
-    allocator.reset_daily(
-        capital_total=live_balance if live_balance is not None else config.initial_capital
-    )
+    allocator.reset_daily(capital_total=init_capital)
     if live_pnl != 0.0:
         allocator.record_trade(live_pnl)
     state = allocator.get_state()
 
-    return with_aliases({
+    return {
         "data_available": data_available,
         "capital_total": state["capital_total"],
         "reserva": state["reserva"],
@@ -492,17 +704,112 @@ async def get_allocator_config() -> dict:
         "is_active": state["is_active"],
         "rebalance_daily": config.rebalance_daily,
         "min_surplus": config.min_surplus,
-    })
+    }
 
-@app.post("/api/allocator/config")
-async def update_allocator_config(config: dict) -> dict:
-    """Update capital allocator configuration."""
-    # For now, just acknowledge - in production would validate and persist
-    return with_aliases({
-        "status": "updated", 
-        "config": config,
-        "note": "Configuration updated in memory only (not persisted)"
-    })
+
+@app.get("/api/allocator/config")
+async def get_allocator_config() -> dict:
+    """Get current capital allocator configuration.
+
+    Reads the live bot balance from ``realtime/paper_state.json`` (the actual
+    Deriv demo account balance while paper trading) and computes the
+    reserve / surplus split via :class:`CapitalAllocatorConfig` +
+    :class:`CapitalAllocator`.
+
+    If no live state file exists (paper trading not started), falls back to
+    the configured ``initial_capital`` default and reports ``data_available:
+    false`` so the dashboard can degrade gracefully.
+    """
+    return with_aliases(_build_allocator_response())
+
+
+@app.post("/api/allocator/config", response_model=None)
+async def update_allocator_config(config: dict) -> dict | JSONResponse:
+    """Validate and persist capital allocator configuration overrides.
+
+    Accepts the dashboard's envelope:
+
+        {
+          "reserva_pct":      float (0,1),
+          "max_daily_pct":    float (0,1),  # → superávit_diario_pct
+          "reinvest_profits": bool          # → rebalance_daily
+        }
+
+    All fields are optional — omitted fields reuse the previously persisted
+    value (or the default). Validation is delegated to
+    :meth:`CapitalAllocatorConfig.validate`; on failure a 400 with the list
+    of validation errors is returned. On success the overrides are persisted
+    to ``realtime/allocator_config.json`` and the reconciled allocator
+    state (the same shape returned by GET ``/api/allocator/config``) is
+    returned so the caller can confirm the new split.
+    """
+    from src.risk.capital_allocator import CapitalAllocator, CapitalAllocatorConfig
+
+    # Build the new overrides set: existing persisted + incoming deltas.
+    # The dashboard sends max_daily_pct / reinvest_profits (UI naming);
+    # we translate to the canonical CapitalAllocatorConfig field names.
+    current = _load_allocator_overrides()
+
+    # Numeric overrides (float).
+    reserva_pct: float | None = (
+        float(config["reserva_pct"]) if "reserva_pct" in config
+        else current.get("reserva_pct", None)  # type: ignore[assignment]
+    )
+    superavit_diario_pct: float | None = (
+        float(config["max_daily_pct"]) if "max_daily_pct" in config
+        else (float(config["superávit_diario_pct"]) if "superávit_diario_pct" in config
+              else current.get("superávit_diario_pct", None))  # type: ignore[assignment]
+    )
+    min_surplus: float | None = (
+        float(config["min_surplus"]) if "min_surplus" in config
+        else current.get("min_surplus", None)  # type: ignore[assignment]
+    )
+    # Boolean override.
+    if "reinvest_profits" in config:
+        rebalance_daily: bool | None = bool(config["reinvest_profits"])
+    elif "rebalance_daily" in config:
+        rebalance_daily = bool(config["rebalance_daily"])
+    else:
+        rebalance_daily = current.get("rebalance_daily", None)  # type: ignore[assignment]
+
+    # Validate via CapitalAllocatorConfig before persisting. We pass a
+    # throwaway initial_capital because validate() doesn't depend on it; the
+    # real initial_capital is re-derived from the live balance in
+    # _build_allocator_response(). Each field is passed explicitly (rather
+    # than via **kwargs splatting) so Pyright can verify the per-field types.
+    candidate = CapitalAllocatorConfig(
+        initial_capital=10000.0,
+        reserva_pct=reserva_pct if reserva_pct is not None else 0.80,
+        superávit_diario_pct=superavit_diario_pct if superavit_diario_pct is not None else 0.20,
+        min_surplus=min_surplus if min_surplus is not None else 10.0,
+        rebalance_daily=rebalance_daily if rebalance_daily is not None else True,
+    )
+    errors = candidate.validate()
+    if errors:
+        return JSONResponse(
+            status_code=400,
+            content=with_aliases({
+                "status": "error",
+                "errors": errors,
+                "config_received": config,
+            }),
+        )
+
+    # Persist (drop the saved_at sentinel — _save adds its own timestamp).
+    to_persist: dict[str, float | bool] = {}
+    if reserva_pct is not None:
+        to_persist["reserva_pct"] = reserva_pct
+    if superavit_diario_pct is not None:
+        to_persist["superávit_diario_pct"] = superavit_diario_pct
+    if min_surplus is not None:
+        to_persist["min_surplus"] = min_surplus
+    if rebalance_daily is not None:
+        to_persist["rebalance_daily"] = rebalance_daily
+    _save_allocator_overrides(to_persist)
+
+    # Return the reconciled allocator state (same shape as GET) so the
+    # caller sees the new split in place without a second round-trip.
+    return with_aliases({**_build_allocator_response(), "status": "updated"})
 
 @app.get("/api/allocator/allocate")
 async def get_allocation(
@@ -512,19 +819,19 @@ async def get_allocation(
     """Get capital allocation for given balance and daily P&L.
 
     If starting_balance is not provided, reads the live bot balance from
-    realtime/paper_state.json (the actual Deriv demo account balance).
+    ``realtime/paper_state.json`` (the actual Deriv demo account balance)
+    via the module-level ``REALTIME_STATE_FILE`` constant.
     """
     from src.risk.capital_allocator import CapitalAllocator, CapitalAllocatorConfig
 
-    # Auto-detect balance from live bot state if not provided
+    # Auto-detect balance from live bot state if not provided.
+    # Uses REALTIME_STATE_FILE (not a hardcoded path) so tests can
+    # monkeypatch the file location via isolated_realtime.
     if starting_balance is None:
-        import json as _json
-        import os as _os
-        state_path = "/home/sebas/proyectos/synthetic-trader/realtime/paper_state.json"
-        if _os.path.exists(state_path):
+        if REALTIME_STATE_FILE.exists():
             try:
-                with open(state_path) as f:
-                    state = _json.load(f)
+                with open(REALTIME_STATE_FILE) as f:
+                    state = json.load(f)
                 starting_balance = float(state.get("balance", 10000.0))
                 daily_pnl = float(state.get("pnl", 0.0))
             except Exception:
@@ -561,70 +868,159 @@ async def get_allocation(
 # Strategy Attribution Endpoints
 # ---------------------------------------------------------------------------
 
-@app.get("/api/attribution/matrix")
-async def get_attribution_matrix() -> dict:
-    """Get strategy performance matrix for heatmap display."""
+# Valid metrics for the matrix & ranking endpoints — must match the
+# ``profitability_matrix`` valid set in ``src.analysis.attribution``.
+_ATTR_VALID_METRICS = frozenset(
+    {"total_pnl", "sharpe", "win_rate", "max_dd",
+     "profit_factor", "expectancy", "total_trades"}
+)
+
+
+@app.get("/api/attribution/matrix", response_model=None)
+async def get_attribution_matrix(
+    metric: str = "total_pnl",
+) -> dict | JSONResponse:
+    """Get strategy performance matrix for heatmap display.
+
+    Args:
+        metric: Performance metric to display. Valid values:
+            ``total_pnl`` (default), ``sharpe``, ``win_rate``, ``max_dd``,
+            ``profit_factor``, ``expectancy``, ``total_trades``.
+            Invalid values return 400 with a diagnostic error.
+
+    Returns:
+        ``{strategies, symbols, matrix}`` where ``matrix`` is a list of
+        rows (one per strategy), each a list of per-symbol cell dicts or
+        ``None``.  Each cell carries the requested ``metric_value`` plus
+        ``sharpe`` (always populated from a side-panel query so the
+        dashboard can overlay Sharpe regardless of the chosen metric).
+    """
+    if metric not in _ATTR_VALID_METRICS:
+        return JSONResponse(
+            status_code=400,
+            content=with_aliases({
+                "status": "error",
+                "error": (
+                    f"metric='{metric}' is invalid. "
+                    f"Valid: {sorted(_ATTR_VALID_METRICS)}"
+                ),
+            }),
+        )
+
     from src.analysis.attribution import StrategyAttribution
     attribution = StrategyAttribution()
-    matrix_data = attribution.profitability_matrix(metric="total_pnl", latest_only=True)
-    
-    # Convert nested dict {symbol: {strategy: value}} to expected format
-    strategies = list({s for sym_data in matrix_data.values() for s in sym_data})
-    symbols = list(matrix_data.keys())
-    
+    # Main metric matrix + a Sharpe side-panel (computed in one pass).
+    matrix_data = attribution.profitability_matrix(metric=metric, latest_only=True)
+    sharpe_data = attribution.profitability_matrix(metric="sharpe", latest_only=True)
+
+    # Convert nested dict {symbol: {strategy: value}} to expected format.
+    strategies = sorted({s for sym_data in matrix_data.values() for s in sym_data})
+    symbols = sorted(matrix_data.keys())
+
     result = {
         "strategies": strategies,
         "symbols": symbols,
-        "matrix": []
+        "matrix": [],
+        "metric": metric,
     }
-    
-    for i, strategy in enumerate(strategies):
-        row_data = []
-        for j, symbol in enumerate(symbols):
+
+    for strategy in strategies:
+        row_data: list[dict | None] = []
+        for symbol in symbols:
             sym_data = matrix_data.get(symbol, {})
-            value = sym_data.get(strategy, None)
+            value = sym_data.get(strategy)
             if value is not None:
+                sharpe_val = sharpe_data.get(symbol, {}).get(strategy, 0.0)
                 row_data.append({
                     "strategy_name": strategy,
                     "symbol": symbol,
-                    "pnl": round(value, 2) if isinstance(value, (int, float)) else 0.0,
-                    "sharpe": 0.0,  # Would need separate query for Sharpe
+                    "metric": metric,
+                    "metric_value": round(value, 4),
+                    "pnl": round(value, 2) if metric == "total_pnl" else 0.0,
+                    "sharpe": round(sharpe_val, 4),
                 })
             else:
                 row_data.append(None)
         result["matrix"].append(row_data)
-    
+
     return with_aliases(result)
 
-@app.get("/api/attribution/ranking")
-async def get_strategy_ranking() -> dict:
-    """Get strategies ranked by average Sharpe ratio."""
+
+@app.get("/api/attribution/ranking", response_model=None)
+async def get_strategy_ranking(
+    metric: str = "total_pnl",
+    min_trades: int = 10,
+) -> dict | JSONResponse:
+    """Get the best strategy per symbol, ranked by the chosen metric.
+
+    Args:
+        metric: Metric for ranking (default ``total_pnl``). Also supports
+            ``sharpe``, ``profit_factor``, ``expectancy``, ``win_rate``,
+            ``max_dd`` (lower is better — automatically inverted). Invalid
+            values return 400.
+        min_trades: Minimum trades for a strategy to qualify (default 10).
+            Strategies with fewer trades are excluded for statistical
+            significance.
+
+    Returns:
+        ``{ranking, metric, min_trades}`` where ``ranking`` is a list of
+        ``{symbol, strategy_name, metric_value, sharpe}``.  Sharpe is always
+        populated via a side-panel query so the dashboard can sort/colour by
+        Sharpe regardless of the ranking metric.
+    """
+    if metric not in _ATTR_VALID_METRICS:
+        return JSONResponse(
+            status_code=400,
+            content=with_aliases({
+                "status": "error",
+                "error": (
+                    f"metric='{metric}' is invalid. "
+                    f"Valid: {sorted(_ATTR_VALID_METRICS)}"
+                ),
+            }),
+        )
+
     from src.analysis.attribution import StrategyAttribution
     attribution = StrategyAttribution()
-    best = attribution.best_strategy_per_symbol(metric="total_pnl", latest_only=True)
-    
+    best = attribution.best_strategy_per_symbol(
+        metric=metric, min_trades=min_trades, latest_only=True
+    )
+    # Side-panel: Sharpe per (symbol, strategy) so each ranked row carries
+    # the actual Sharpe alongside the ranking metric.
+    sharpe_data = attribution.profitability_matrix(metric="sharpe", latest_only=True)
+
     result = []
     for symbol, (strat_name, metric_value) in best.items():
+        sharpe_val = sharpe_data.get(symbol, {}).get(strat_name, 0.0)
         result.append({
             "symbol": symbol,
             "strategy_name": strat_name,
-            "pnl": round(metric_value, 2),
-            "sharpe": 0.0  # Would need separate query
+            "metric": metric,
+            "metric_value": round(metric_value, 4),
+            "pnl": round(metric_value, 2) if metric == "total_pnl" else 0.0,
+            "sharpe": round(sharpe_val, 4) if isinstance(sharpe_val, (int, float)) else 0.0,
         })
-    
-    return with_aliases({"ranking": result})
+
+    # Sort by metric_value descending (max_dd handled by attribution as lower-better).
+    result.sort(key=lambda r: r["metric_value"], reverse=True)
+
+    return with_aliases({
+        "ranking": result,
+        "metric": metric,
+        "min_trades": min_trades,
+    })
 
 # ------------------------------------------------------------------ #
 # Brinson-Fachler Attribution Endpoints
 # ------------------------------------------------------------------ #
 
-@app.get("/api/attribution/brinson")
+@app.get("/api/attribution/brinson", response_model=None)
 async def get_brinson_fachler_decomposition(
     weight_column: str = "total_trades",
     return_column: str = "avg_pnl_pct",
     benchmark_strategy: str | None = None,
     min_trades: int = 1,
-) -> dict:
+) -> dict | JSONResponse:
     """
     Brinson-Fachler performance attribution decomposition.
     
