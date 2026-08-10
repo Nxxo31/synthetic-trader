@@ -66,6 +66,35 @@ Phase 4: Live Trading → solo con aprobacion explicita
 ## PROJECT.md
 `~/proyectos/synthetic-trader/PROJECT.md` es la fuente de verdad.
 
+
+## MCP Tools — MANDATORY for this project
+
+| Task | Tool | NEVER use |
+|------|------|-----------|
+| Understand API structure | `mcp__lsp_intelligence__document_symbols` | grep |
+| Verify type safety | `mcp__lsp_intelligence__live_diagnostics` | tsc --noEmit |
+| Edit Python/TS files | `mcp__zenith__edit_file or write_file` | sed |
+| Search across codebase | `mcp__zenith__search_files` | grep, rg |
+| Commit to GitHub | `mcp__github__push_files` | git commit + git push |
+| Code review | `mcp__mcp_code_review_pro__review_diff` | manual inspection only |
+| Visual QA dashboard | `mcp__playwright__browser_take_screenshot` | guessing UI |
+
+## Test Strategy
+- Pytest: strategy unit + integration (real tick data, no mocks)
+- Playwright: dashboard frontend QA (all pages, charts, WebSocket live data)
+- LSP live_diagnostics: 0 type errors
+- py_compile + pyright: backend type check
+
+## Development loop (MCP-first)
+1. Read PROJECT.md FIRST
+2. `mcp__lsp_intelligence__document_symbols` on files to modify — understand structure before editing
+3. Edit via `mcp__zenith__edit_file` or `write_file` — NEVER sed for code
+4. `mcp__lsp_intelligence__live_diagnostics` after edit — 0 errors
+5. Code review via `mcp__mcp_code_review_pro__review_diff` or `delegate_task`
+6. gitleaks on staged diff
+7. Update PROJECT.md before commit
+8. Commit via `mcp__github__push_files` — atomic conventional commit
+
 ## Development loop for this project
 
 1. Read PROJECT.md → check active phase and known limitations
