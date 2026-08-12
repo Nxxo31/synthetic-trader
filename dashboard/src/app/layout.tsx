@@ -1,42 +1,25 @@
-import type { Metadata } from "next";
-import { Inter, Instrument_Serif, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
-import Nav from "./nav";
-
-const inter = Inter({
-  variable: "--font-inter",
-  subsets: ["latin"],
-});
-
-const display = Instrument_Serif({
-  variable: "--font-display",
-  subsets: ["latin"],
-  weight: ["400"],
-  style: ["normal", "italic"],
-});
-
-const mono = JetBrains_Mono({
-  variable: "--font-mono",
-  subsets: ["latin"],
-  weight: ["400", "500", "700"],
-});
+import type { Metadata } from "next";
+import { Nav } from "@/components/nav";
+import { useLiveData } from "@/hooks/use-live-data";
 
 export const metadata: Metadata = {
-  title: "SynthIA Terminal — Synthetic Trader",
-  description:
-    "Dashboard de trading algorítmico para índices sintéticos en Deriv — monitoreo en tiempo real, curva de capital y gestión de riesgo.",
+  title: "Synthetic Trader Dashboard",
+  description: "Real-time trading dashboard for synthetic indices",
 };
 
 export default function RootLayout({
   children,
-}: Readonly<{
+}: {
   children: React.ReactNode;
-}>) {
+}) {
+  const { state } = useLiveData();
+  
   return (
-    <html lang="es" className={`${inter.variable} ${display.variable} ${mono.variable}`}>
-      <body>
+    <html lang="en" className={state?.mode === "paper" ? "dark" : ""}>
+      <body className="antialiased">
         <Nav />
-        {children}
+        <main className="min-h-[calc(100vh-4rem)]">{children}</main>
       </body>
     </html>
   );

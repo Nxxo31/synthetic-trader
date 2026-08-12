@@ -1,102 +1,90 @@
-:root {
-  /* SynthIA Terminal — Design Tokens */
-  --background: #0a0e14;
-  --foreground: #e4e9f0;
-  --text-muted: #5a6577;
-  --panel: #12161c;
-  --card: #161b24;
-  --border: #1e2530;
-  --border-hover: #2a3540;
-  --accent-cyan: #00d4ff;
-  --accent-green: #00ff9d;
-  --accent-red: #ff3860;
-  --accent-amber: #ffb547;
-  --glow-cyan: 0 0 20px rgba(0, 212, 255, 0.15);
-  --radius: 4px;
-  --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', ui-monospace, monospace;
-}
+@import "tailwindcss";
 
-html {
-  height: 100%;
-  color-scheme: dark;
-}
+@theme {
+  --color-background: #0a0b0f;
+  --color-foreground: #e4e4e7;
+  --color-card: #15161c;
+  --color-card-foreground: #e4e4e7;
+  --color-muted: #1c1d24;
+  --color-muted-foreground: #71717a;
+  --color-border: #27272f;
+  --color-input: #27272f;
+  --color-primary: #6366f1;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #1c1d24;
+  --color-secondary-foreground: #e4e4e7;
+  --color-accent: #22c55e;
+  --color-accent-foreground: #0a0b0f;
+  --color-destructive: #ef4444;
+  --color-destructive-foreground: #ffffff;
+  --color-warning: #f59e0b;
+  --color-warning-foreground: #0a0b0f;
+  --color-ring: #6366f1;
+  --radius: 0.5rem;
 
-html,
-body {
-  max-width: 100vw;
-  overflow-x: hidden;
-}
-
-body {
-  min-height: 100%;
-  color: var(--foreground);
-  background: var(--background);
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
 }
 
 * {
-  box-sizing: border-box;
-  padding: 0;
-  margin: 0;
+  border-color: var(--color-border);
 }
 
-a {
-  color: inherit;
-  text-decoration: none;
+body {
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
 }
 
-button {
-  font-family: inherit;
+body::before {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-image:
+    radial-gradient(circle at 15% 50%, rgba(99, 102, 241, 0.05), transparent 50%),
+    radial-gradient(circle at 85% 30%, rgba(34, 197, 94, 0.04), transparent 50%);
+  pointer-events: none;
+  z-index: -1;
 }
 
-/* Range slider baseline */
-input[type='range'] {
-  appearance: none;
-  -webkit-appearance: none;
-  background: transparent;
-}
-
-/* Scrollbar — thin, terminal-style */
+/* Scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: transparent;
+  background: var(--color-background);
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--border);
+  background: var(--color-border);
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--border-hover);
+  background: var(--color-muted-foreground);
 }
 
-/* Utility classes */
-.font-mono {
-  font-family: var(--font-mono);
+/* Utilities */
+.tabular-nums {
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
 }
 
-.font-display,
-.bigNumber,
-.logo,
-.brandMark {
-  font-family: 'Instrument Serif', Georgia, serif;
+@keyframes pulse-green {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4); }
+  50% { box-shadow: 0 0 0 6px rgba(34, 197, 94, 0); }
+}
+.pulse-green {
+  animation: pulse-green 2s infinite;
 }
 
-/* Pulsing dot animation for live status */
-@keyframes pulse-dot {
-  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(0, 255, 157, 0.4); }
-  50% { opacity: 0.6; box-shadow: 0 0 0 6px rgba(0, 255, 157, 0); }
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
 }
-
-.pulse-dot {
-  animation: pulse-dot 2s ease-in-out infinite;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .pulse-dot { animation: none; }
+.fade-in {
+  animation: fade-in 0.3s ease-out;
 }
