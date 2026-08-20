@@ -1,6 +1,73 @@
 # PROJECT.md — Synthetic Trader SaaS
 
-> **Estado:** Activo — Paper Trading 24/7 en curso | **Versión:** 0.3.0 | **Última actualización:** 2026-08-03
+> **Estado:** Activo — Paper Trading 24/7 en curso (stpRNG + step_index) | **Versión:** 0.4.0 | **Última actualización:** 2026-08-14
+
+---
+
+## 📋 Sesión 2026-08-14 — Step Index + stpRNG
+
+### Objetivo
+Que el bot genere estrategias que multipliquen los $10,000 de la cuenta demo, operando con poco dinero ($1/trade) y maximizando rentabilidad por trade.
+
+### Cambios aplicados
+
+**Estrategia principal:** Cambiada de `aggressive_breakout` (R_100) a `step_index` (stpRNG)
+- stpRNG = Step Index 100, la "joya" de Deriv según investigación (movimiento predecible en escalones, 24/7)
+- reason: R_100 tiene movimientos erráticos; stpRNG es determinista
+
+**Parámetros de StepIndexConfig ajustados:**
+- `step_size_pct` calibrado a `0.000003` para stpRNG (ATR ~$1.06, precio ~$7,734)
+- `reversion_steps` bajado de 3.0 a 1.5 (stpRNG se mueve en micro-pasos)
+- `reversion_max_steps` bajado de 6.0 a 4.0
+- `score_threshold` bajado de 0.30 a 0.15 (generar más señales)
+- `sl_steps=2.0`, `tp_steps=3.0` (RR 1:1.5)
+- `max_duration=600s` (10 min por trade)
+
+**Position sizing:**
+- Stake cap: `min(balance * 0.02, $1.00)` — $1 por trade para bajo coste
+- Kelly dinámico con vol_multiplier=1.0
+
+**Trading loop:**
+- Cooldown de señales: 10s (bajado de 120s para permitir más trades)
+- `_execute_signal` arreglado: error de format string `2%=` causaba ValueError
+
+**Auto-resolver:**
+- Agregado `STP` y `stp` a los prefijos que mapean a `step_index`
+
+**Step size map:**
+- Agregados stpRNG, stpRNG2-5 en STEP_SIZE_PCT (case-insensitive)
+
+**Dashboard:**
+- Creado `theme-provider.tsx` (client component) — layout.tsx era Server Component usando hooks
+- Arreglado `size="full"` → `size="default"` en backtest page (Mantine no soporta "full")
+
+**Skill creada:**
+- `algorithmic-trading-synthetic-indices` en ~/.hermes/skills/ — cumple trader profile
+
+**Supervisor:**
+- `paper_247.py` corriendo 24/7 con reinicio automático y backoff exponencial
+- Cron job `synthetic-trader-monitor` cada 30m monitorea balance, P&L, circuit breaker
+
+### Estado actual (2026-08-14 18:22 UTC)
+- **Símbolo:** stpRNG (Step Index 100)
+- **Estrategia:** step_index (tendencia + reversión a la media)
+- **Balance:** $9,997 (P&L: -$3, 3 trades perdidos de $1 cada uno)
+- **Cuenta demo:** DOT93744719, reiniciada a $10,000
+- **Backend:** FastAPI en puerto 8001
+- **Dashboard:** Next.js en puerto 3000
+- **Cron monitor:** job 9b13ec55931b cada 30m
+
+### Bugs encontrados y corregidos
+1. `_trading_loop` nunca existió en git — implementado desde paper_trader.py
+2. Step size de stpRNG en STEP_SIZE_PCT usaba 0.001 (demasiado grande, 750x) — recalibrado a 0.000003
+3. `_resolve_step_size` hace `symbol.upper()` pero mapa solo tenía minúsculas — agregadas ambas cases
+4. Logger format string `2%=$%.2f` causaba `ValueError: unsupported format character` — escapado con `%%`
+5. layout.tsx usaba `useLiveData()` sin `"use client"` — extraído a theme-provider.tsx
+6. Cooldown de 120s suprimía todas las señales (candles cada 5s) — bajado a 10s
+
+### Objetivo pendiente
+El bot continúa operando hasta multiplicar los $10,000. El cron job monitorea cada 30m.
+Estrategia actual: step_index con reversión a la media en stpRNG, stake $1, RR 1:1.5.
 
 ---
 
