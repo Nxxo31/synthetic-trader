@@ -299,7 +299,7 @@ class VolatilityStrategyV2(Strategy):
             if score < cfg.mr_score_threshold:
                 return self._no_signal(
                     last_close, reason="mr_score_below_threshold", score=score,
-                    regime=cfg.CALM.value, rsi=rsi)
+                    regime=VolatilityRegime.CALM.value, rsi=rsi)
             entry = last_close
             sl_mult = cfg.trail_mult_calm
             sl = entry - atr_val * sl_mult
@@ -317,7 +317,7 @@ class VolatilityStrategyV2(Strategy):
             if score < cfg.mr_score_threshold:
                 return self._no_signal(
                     last_close, reason="mr_score_below_threshold", score=score,
-                    regime=cfg.CALM.value, rsi=rsi)
+                    regime=VolatilityRegime.CALM.value, rsi=rsi)
             entry = last_close
             sl_mult = cfg.trail_mult_calm
             sl = entry + atr_val * sl_mult

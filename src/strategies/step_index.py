@@ -63,6 +63,17 @@ STEP_SIZE_PCT: dict[str, float] = {
     "STP25": 0.0025,
     "STP50": 0.005,
     "STP100": 0.010,
+    # stpRNG = Step Index 100 (pip_size=0.1, step = 0.1 of pip)
+    "STPRNG": 0.000003,   # calibrated from ATR (~$1.06) / price ($7734) = 0.000137, fine-tuned
+    "STPRNG2": 0.000006,
+    "STPRNG3": 0.00001,
+    "STPRNG4": 0.000015,
+    "STPRNG5": 0.00002,
+    "stpRNG": 0.000003,
+    "stpRNG2": 0.000006,
+    "stpRNG3": 0.00001,
+    "stpRNG4": 0.000015,
+    "stpRNG5": 0.00002,
     "BOOM300": 0.0025,
     "CRASH300": 0.0025,
 }
@@ -114,16 +125,17 @@ class StepIndexConfig:
     atr_period: int = 14
     min_candles: int = 30
     step_size_pct: float | None = None
-    reversion_steps: float = 3.0
-    reversion_max_steps: float = 6.0
+    reversion_steps: float = 1.5
+    reversion_max_steps: float = 4.0
     trend_weight: float = 0.6
     reversion_weight: float = 0.4
     sl_steps: float = 2.0
     tp_steps: float = 3.0
     max_duration: int = 600
-    score_threshold: float = 0.30
+    score_threshold: float = 0.15
     sl_atr_multiplier: float = 1.5
     tp_atr_multiplier: float = 2.0
+    signal_label: str | None = None
 
 
 def _resolve_step_size(symbol: str, config_step: float | None) -> float | None:
@@ -162,7 +174,7 @@ class StepIndexStrategy(Strategy):
 
     def __init__(
         self,
-        symbol: str = "STEPT25",
+        symbol: str = "stpRNG",
         config: StepIndexConfig | None = None,
     ) -> None:
         super().__init__("StepIndex", symbol)
@@ -425,6 +437,7 @@ class StepIndexStrategy(Strategy):
                 "reversion_direction": rev_dir,
                 "reversion_steps": rev_distance_steps,
                 "reversion_weight": rw,
+                "signal_label": self.config.signal_label if self.config.signal_label is not None else None,
             },
         )
 
