@@ -82,8 +82,8 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any
 
@@ -280,7 +280,7 @@ class StrategyAttribution:
 
         conn.execute(
             "INSERT INTO strategies (name, version, description) VALUES (?, ?, ?)",
-            (name, "1.0.0", f"Auto-registered by StrategyAttribution"),
+            (name, "1.0.0", "Auto-registered by StrategyAttribution"),
         )
         conn.commit()
         return int(conn.execute(
@@ -324,7 +324,7 @@ class StrategyAttribution:
             El ``id`` (rowid) de la fila insertada en ``strategy_performance``.
         """
         metrics = self._extract_metrics(result)
-        date = backtest_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        date = backtest_date or datetime.now(UTC).strftime("%Y-%m-%d")
 
         # Allow override of trades if caller provides it explicitly
         if total_trades is not None:
@@ -460,7 +460,7 @@ class StrategyAttribution:
 
         with self._connect() as conn:
             if latest_only:
-                query = """
+                query = f"""
                     SELECT s.name AS strategy, sp.symbol, sp.backtest_date,
                            sp.{metric}
                     FROM strategy_performance sp
@@ -469,20 +469,20 @@ class StrategyAttribution:
                         SELECT MAX(id) FROM strategy_performance
                         GROUP BY strategy_id, symbol
                     )
-                """.format(metric=metric)
+                """
                 rows = conn.execute(query).fetchall()
             else:
                 if metric in ("total_pnl", "total_trades"):
                     agg_fn = "SUM"
                 else:
                     agg_fn = "AVG"
-                query = """
+                query = f"""
                     SELECT s.name AS strategy, sp.symbol,
-                           {agg}(sp.{metric}) AS {metric}
+                           {agg_fn}(sp.{metric}) AS {metric}
                     FROM strategy_performance sp
                     JOIN strategies s ON s.id = sp.strategy_id
                     GROUP BY s.name, sp.symbol
-                """.format(agg=agg_fn, metric=metric)
+                """
                 rows = conn.execute(query).fetchall()
 
         matrix: dict[str, dict[str, float]] = {}
@@ -531,7 +531,7 @@ class StrategyAttribution:
 
         with self._connect() as conn:
             if latest_only:
-                query = """
+                query = f"""
                     SELECT s.name AS strategy, sp.symbol, sp.{metric}, sp.total_trades
                     FROM strategy_performance sp
                     JOIN strategies s ON s.id = sp.strategy_id
@@ -539,17 +539,17 @@ class StrategyAttribution:
                         SELECT MAX(id) FROM strategy_performance
                         GROUP BY strategy_id, symbol
                     )
-                """.format(metric=metric)
+                """
             else:
                 agg_fn = "SUM" if metric in ("total_pnl", "total_trades") else "AVG"
-                query = """
+                query = f"""
                     SELECT s.name AS strategy, sp.symbol,
-                           {agg}(sp.{metric}) AS {metric},
+                           {agg_fn}(sp.{metric}) AS {metric},
                            SUM(sp.total_trades) AS total_trades
                     FROM strategy_performance sp
                     JOIN strategies s ON s.id = sp.strategy_id
                     GROUP BY s.name, sp.symbol
-                """.format(agg=agg_fn, metric=metric)
+                """
 
             rows = conn.execute(query).fetchall()
 
@@ -610,7 +610,7 @@ class StrategyAttribution:
             ),
             "metric": metric,
             "min_trades": min_trades,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": datetime.now(UTC).isoformat(),
         }
 
     # ------------------------------------------------------------------ #
