@@ -1,0 +1,111 @@
+# Synthetic Trader Config
+# API credentials loaded from .env or environment variables
+
+deriv:
+  # New Deriv API (developers.deriv.com) — REST + WebSocket hybrid
+  # REST base URL for OTP and account management
+  api_base_url: "https://api.derivws.com"
+  # WebSocket paths (OTP flow returns full URL with token)
+  ws_demo_path: "/trading/v1/options/ws/demo"
+  ws_real_path: "/trading/v1/options/ws/real"
+  ws_public_path: "/trading/v1/options/ws/public"
+  # OTP endpoint path
+  otp_path: "/trading/v1/options/accounts"
+  # App ID from https://developers.deriv.com/dashboard/applications
+  # Alphanumeric PAT app ID (NOT the legacy numeric 1089)
+  app_id: "33Y5EmAQJgXagwIUJQ8Vw"
+  # Account IDs (from GET /trading/v1/options/accounts)
+  demo_account: "DOT93744719"
+  real_account: "ROT92215439"
+  # Set to false for real account (DANGER: requires explicit approval)
+  is_demo: true
+  # OTP lifetime (seconds) — Deriv OTPs are valid for 120s, single use
+  otp_lifetime: 120
+  # Legacy endpoint (deprecated — kept for reference only)
+  legacy_endpoint: "wss://ws.derivws.com/websockets/v3"
+  legacy_app_id: 1089
+
+# Instruments to trade
+instruments:
+  # Range Break = ONLY synthetic where technical analysis works
+  range_break:
+    - symbol: "RB100"
+      display_name: "Range Break 100"
+      enabled: true
+    - symbol: "RB200"
+      display_name: "Range Break 200"
+      enabled: false
+  # Volatility indices for statistical analysis
+  volatility:
+    - symbol: "R_10"
+      display_name: "Volatility 10%"
+      enabled: false
+    - symbol: "R_50"
+      display_name: "Volatility 50%"
+      enabled: false
+
+# Risk management — NON-NEGOTIABLE
+risk:
+  # Max risk per trade as fraction of capital
+  max_risk_per_trade: 0.015
+  # Max daily drawdown as fraction of capital
+  max_daily_drawdown: 0.05
+  # Max trades per day
+  max_trades_per_day: 8
+  # Circuit breaker: consecutive losses before auto-halt
+  circuit_breaker_losses: 5
+  # Kelly fraction (quarter-Kelly = 0.25)
+  kelly_fraction: 0.25
+  # Initial capital for paper trading (USD)
+  initial_capital: 10000.0
+
+# Strategy configuration
+strategy:
+  range_break:
+    # Min ticks to confirm channel (20 = more signals on tight RB100 channels)
+    min_channel_ticks: 20
+    # Min channel width as fraction of mid price (0.01% — RB100 channels are 0.03-0.10%)
+    min_channel_width: 0.0001
+    # Buffer above/below channel for entry (0.0 — breakout itself is the signal)
+    entry_buffer: 0.0
+    # TP = entry +/- this fraction of channel width (1.0 = full width, ensures positive Kelly)
+    tp_fraction: 1.0
+    # SL buffer beyond opposite channel edge (0.0 = SL at channel edge)
+    sl_buffer: 0.0
+    # Max position duration (seconds) — 15 min tighter exits
+    max_duration: 900
+
+# Backtest configuration
+backtest:
+  # Granularity in seconds for candle data
+  granularity: 60
+  # Lookback period for historical data (days)
+  lookback_days: 180
+  # Walk-forward: train/test split ratio
+  train_ratio: 0.67
+  # Monte Carlo simulations
+  mc_simulations: 10000
+  # Gate criteria
+  gates:
+    min_sharpe: 1.2
+    max_drawdown: 0.12
+    min_win_rate: 0.52
+    min_expectancy: 0.15
+
+# Paper trading configuration
+paper:
+  # Min duration in days
+  min_days: 15
+  # Min number of trades
+  min_trades: 30
+  # Gate criteria
+  gates:
+    profitable: true
+    max_daily_drawdown: 0.04
+    min_win_rate: 0.50
+
+# Storage
+storage:
+  ticks_dir: "data/ticks"
+  candles_dir: "data/candles"
+  reports_dir: "reports"

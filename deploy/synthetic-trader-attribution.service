@@ -1,0 +1,45 @@
+# synthetic-trader-attribution.service
+#
+# Servicio disparado por ``synthetic-trader-attribution.timer``.
+#
+# Puebla ``data/strategies.db`` (tabla ``strategy_performance``) con los
+# resultados del día a partir de los daily reports en
+# ``reports/daily/*.json`` que genera el paper_runner cada 00:00 UTC.
+#
+# Es idempotente (ver docstring de ``src/analysis/daily_attribution.py``):
+# detecta rows duplicados por (strategy_name, symbol, backtest_date,
+# total_trades, total_pnl) y los salta.  Por eso es seguro re-ejecutarlo.
+#
+# Una vez poblado ``strategies.db``, el dashboard /projection y el
+# endpoint /api/attribution muestran la matriz de rendimientos
+# estrategia × símbolo.
+#
+# Instalación: ver ``synthetic-trader-attribution.timer``.
+
+[Unit]
+Description=Synthetic Trader — Daily Attribution (Brinker-Fachler)
+Documentation=file:///home/sebas/proyectos/synthetic-trader/PROJECT.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/sebas/proyectos/synthetic-trader
+# daily_attribution es un módulo de src.analysis (no un script suelto),
+# por eso se invoca con ``-m``.  Ejecuta TODOS los daily reports no
+# importados aún (idempotente — ver docstring).
+ExecStart=/home/sebas/proyectos/synthetic-trader/.venv/bin/python -m src.analysis.daily_attribution
+User=sebas
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=-/home/sebas/proyectos/synthetic-trader/.env
+
+# Hardening básico — no necesita red ni CPU.
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/sebas/proyectos/synthetic-trader/data /home/sebas/proyectos/synthetic-trader/reports /home/sebas/proyectos/synthetic-trader/logs
+NoNewPrivileges=true
+
+# Logging al journal — visible desde ``journalctl -u synthetic-trader-attribution``
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=synthetic-trader-attribution

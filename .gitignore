@@ -1,0 +1,36 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+*.egg-info/
+dist/
+build/
+.eggs/
+*.parquet
+*.db
+*.sqlite
+data/ticks/
+data/candles/
+reports/backtest/
+reports/paper/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+# Playwright test artifacts
+test-results/
+playwright-report/
+# Logs
+logs/
+# Realtime state (regenerated at runtime)
+realtime/
+# Sketches
+sketches/
+
+
+# Dashboard (Next.js) — formerly broken submodule, now part of repo
+dashboard/node_modules/
+dashboard/.next/
+dashboard/.git/
+dashboard/out/
+dashboard/build/

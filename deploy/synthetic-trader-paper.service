@@ -1,0 +1,37 @@
+# synthetic-trader-paper.service
+#
+# systemd unit para paper trading 24/7 del Synthetic Trader.
+#
+# NOTA: Existe una versión más completa con hardening systemd
+# (NoNewPrivileges, ProtectSystem, MemoryMax, etc.) en
+# ``deploy/systemd/synthetic-trader-paper.service``.  Este archivo en
+# ``deploy/`` es la versión de referencia del task (minimalista), kept
+# para fines de documentación del deploy.  Se recomienda instalar la
+# versión hardened de ``deploy/systemd/`` en el sistema target.
+#
+# Instalación (requiere sudo — no ejecutar desde el agent):
+#
+#   sudo cp deploy/systemd/synthetic-trader-paper.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now synthetic-trader-paper
+#   systemctl status synthetic-trader-paper
+#
+# Logs:
+#   journalctl -u synthetic-trader-paper -f
+
+[Unit]
+Description=Synthetic Trader Paper Trading 24/7
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/sebas/proyectos/synthetic-trader
+ExecStart=/home/sebas/proyectos/synthetic-trader/.venv/bin/python scripts/paper_247.py
+Restart=always
+RestartSec=10
+User=sebas
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
