@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -105,7 +105,7 @@ class DailyReporter:
             "halt_reason": circuit_breaker_status.get("halt_reason", "") if circuit_breaker_status else "",
             "consecutive_losses": circuit_breaker_status.get("consecutive_losses", 0) if circuit_breaker_status else 0,
             "trades": trades,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": datetime.now(UTC).isoformat(),
         }
 
         # Save to JSON

@@ -1,7 +1,6 @@
 import "./globals.css";
 import type { Metadata } from "next";
 import { Nav } from "@/components/nav";
-import { useLiveData } from "@/hooks/use-live-data";
 
 export const metadata: Metadata = {
   title: "Synthetic Trader Dashboard",
@@ -13,10 +12,8 @@ export default function RootLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const { state } = useLiveData();
-  
   return (
-    <html lang="en" className={state?.mode === "paper" ? "dark" : ""}>
+    <html lang="en" className="dark">
       <body className="antialiased">
         <Nav />
         <main className="min-h-[calc(100vh-4rem)]">{children}</main>

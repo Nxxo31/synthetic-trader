@@ -37,7 +37,7 @@ class TelegramNotifier:
         self.api_url = f"{TG_API_BASE}{bot_token}/sendMessage"
 
     @classmethod
-    def from_env(cls) -> "TelegramNotifier | None":
+    def from_env(cls) -> TelegramNotifier | None:
         """Crea el notificador desde variables de entorno.
 
         Retorna None si las variables no están configuradas.
@@ -134,8 +134,8 @@ class TelegramNotifier:
             message += f"🛑 *Razón*: {halt_reason}\n"
         if consec_losses > 0:
             message += f"⚠️ *Pérdidas consec.*: `{consec_losses}`\n"
-        message += f"━━━━━━━━━━━━━━━━━━━━\n"
-        message += f"🤖 _Synthetic Trader v0.2.0_"
+        message += "━━━━━━━━━━━━━━━━━━━━\n"
+        message += "🤖 _Synthetic Trader v0.2.0_"
 
         return self.send_message(message)
 

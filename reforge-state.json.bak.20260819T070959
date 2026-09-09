@@ -1,0 +1,40 @@
+{
+  "created_at": "2026-08-18T06:55:14.019918+00:00",
+  "last_scan": null,
+  "architecture_hypothesis": null,
+  "health_history": [
+    {
+      "timestamp": "2026-08-18T06:55:14.019797+00:00",
+      "score": 59.1,
+      "dead_code_ratio": 0.004,
+      "duplicate_ratio": 0.206,
+      "god_file_count": 22,
+      "circular_count": 0,
+      "total_files": 75,
+      "total_functions": 506
+    },
+    {
+      "timestamp": "2026-08-19T01:21:05.526484+00:00",
+      "score": 60.5,
+      "dead_code_ratio": 0.004,
+      "duplicate_ratio": 0.191,
+      "god_file_count": 22,
+      "circular_count": 0,
+      "total_files": 75,
+      "total_functions": 503
+    },
+    {
+      "timestamp": "2026-08-19T02:13:44.207708+00:00",
+      "score": 58.7,
+      "dead_code_ratio": 0.004,
+      "duplicate_ratio": 0.209,
+      "god_file_count": 22,
+      "circular_count": 0,
+      "total_files": 75,
+      "total_functions": 506
+    }
+  ],
+  "fix_log": [],
+  "embeddings_cache": {},
+  "pending_fixes": []
+}

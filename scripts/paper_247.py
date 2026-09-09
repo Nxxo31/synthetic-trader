@@ -71,7 +71,7 @@ STOP_SEMAPHORE = PROJECT_ROOT / "realtime" / "paper_247.stop"
 archivo, esperar a que el bot termine su candle/posición, y luego el
 supervisor simplemente esperará hasta que se elimine."""
 
-BOT_COMMAND: list[str] = [sys.executable, "-m", "src.main", "paper"]
+BOT_COMMAND: list[str] = [sys.executable, "-m", "src.main", "--executor", "paper"]
 """Comando del bot. Usa el mismo intérprete Python que el supervisor."""
 
 # Defaults de backoff y seguridad

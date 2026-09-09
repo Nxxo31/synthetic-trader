@@ -200,7 +200,7 @@ export default function Dashboard() {
                 ))}
                 {positions.length > 10 && (
                   <tr>
-                    <td colSpan="6" className="px-4 py-3 text-center text-xs text-muted-foreground">
+                    <td colSpan={6} className="px-4 py-3 text-center text-xs text-muted-foreground">
                       {positions.length - 10} more positions...
                     </td>
                   </tr>

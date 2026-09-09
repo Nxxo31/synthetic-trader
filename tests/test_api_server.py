@@ -20,7 +20,6 @@ Run:
 from __future__ import annotations
 
 import json
-import os
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -481,6 +480,7 @@ async def test_file_signature_changes_on_write(
     """``_file_signature`` returns ``(mtime, size)`` and the signature changes
     when the file is written to — this is the delta-detection primitive."""
     import time
+
     from src.api.server import _file_signature
 
     f = isolated_realtime / "sig.jsonl"

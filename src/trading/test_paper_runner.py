@@ -15,15 +15,13 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from pathlib import Path
 from unittest import mock
 
 import pytest
 
-from src.trading import paper_runner
-from src.trading.paper_runner import PaperTradingEngine
-
+from src.trading import paper_trader as paper_runner
+from src.trading.paper_trader import PaperTradingEngine
 
 # ---------------------------------------------------------------------------
 #  Helpers — create a minimal engine without running __init__

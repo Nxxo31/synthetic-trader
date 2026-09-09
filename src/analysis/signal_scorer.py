@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from src.analysis.range_detector import ChannelResult, RangeDetector
+from src.analysis.range_detector import RangeDetector
 from src.analysis.volatility_filter import VolatilityFilter
 from src.analysis.volume_analyzer import VolumeAnalyzer
 

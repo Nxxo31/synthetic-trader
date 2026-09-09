@@ -9,17 +9,16 @@ Incluye:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any
-
 import logging
 import random
+from dataclasses import dataclass, field
+
 import numpy as np
 import pandas as pd
 
-from src.strategies.base import Signal, SignalType, Strategy
-from src.risk.manager import RiskManager, RiskConfig
 from src.risk.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
+from src.risk.manager import RiskConfig, RiskManager
+from src.strategies.base import Signal, SignalType, Strategy
 
 logger = logging.getLogger(__name__)
 

@@ -4,11 +4,8 @@ from src.risk.capital_allocator import (
     CapitalAllocatorConfig,
     CapitalAllocatorState,
 )
-from src.risk.manager import RiskConfig, RiskManager
 
 __all__ = [
-    "RiskConfig",
-    "RiskManager",
     "CapitalAllocator",
     "CapitalAllocatorConfig",
     "CapitalAllocatorState",

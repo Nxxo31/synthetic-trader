@@ -13,15 +13,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
 
 import pandas as pd
 
-from src.strategies.base import Signal, SignalType, Strategy
 from src.analysis.range_detector import RangeDetector
-from src.analysis.volume_analyzer import VolumeAnalyzer
-from src.analysis.volatility_filter import VolatilityFilter
 from src.analysis.signal_scorer import SignalScorer
+from src.analysis.volatility_filter import VolatilityFilter
+from src.analysis.volume_analyzer import VolumeAnalyzer
+from src.strategies.base import Signal, SignalType, Strategy
 
 logger = logging.getLogger(__name__)
 

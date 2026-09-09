@@ -12,13 +12,13 @@ Covers:
 """
 from __future__ import annotations
 
+from datetime import UTC
 from pathlib import Path
 
 import pytest
 
 from src.analysis.attribution import StrategyAttribution
 from src.backtest.engine import BacktestResult, Trade
-
 
 # ---------------------------------------------------------------------------
 #  Fixtures
@@ -174,11 +174,11 @@ class TestSavePerformance:
 
     def test_default_backtest_date_is_today(self, attr):
         """If no backtest_date is provided, it should default to today's UTC date."""
-        from datetime import datetime, timezone
+        from datetime import datetime
         result = {"total_pnl": 10.0, "total_trades": 5}
         attr.save_performance("breakout", "R_100", result)
 
-        expected = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        expected = datetime.now(UTC).strftime("%Y-%m-%d")
         import sqlite3
         conn = sqlite3.connect(str(attr.db_path))
         row = conn.execute(

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Quick integration test for CapitalAllocator + RiskManager."""
+"""Quick integration test for CapitalAllocator + RiskEngine."""
 
 import sys
-sys.path.insert(0, '/home/sebas/proyectos/synthetic-trader/src')
+sys.path.insert(0, '/home/sebas/proyectos/synthetic-trader')
 
-from risk.capital_allocator import CapitalAllocator, CapitalAllocatorConfig
-from risk.manager import RiskConfig, RiskManager
+from src.risk.capital_allocator import CapitalAllocator, CapitalAllocatorConfig
+from src.trading.risk_engine import RiskEngine, RiskConfig
 
 def main():
-    print("=== Integration test: CapitalAllocator + RiskManager ===")
+    print("=== Integration test: CapitalAllocator + RiskEngine ===")
 
     # Configs
     alloc_config = CapitalAllocatorConfig(
@@ -28,8 +28,8 @@ def main():
     )
 
     # Objects
-    risk_manager = RiskManager(risk_config)
-    allocator = CapitalAllocator(alloc_config, risk_manager)
+    risk_engine = RiskEngine(risk_config)
+    allocator = CapitalAllocator(alloc_config, risk_engine)
 
     # Day 1 initialization
     allocator.reset_daily(10000.0)

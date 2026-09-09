@@ -8,8 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.analysis.indicators import calculate_atr, calculate_ema, atr_pandas
-
+from src.analysis.indicators import atr_pandas, calculate_atr, calculate_ema
 
 # ---------------------------------------------------------------------------
 #  Fixtures

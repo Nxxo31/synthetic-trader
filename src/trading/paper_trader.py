@@ -20,13 +20,12 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
 
-from src.analysis.recommender import Recommendation, RecommendationEngine
+from src.analysis.recommender import RecommendationEngine
 from src.connection.deriv_client import DerivClient
 from src.risk.circuit_breaker import CircuitBreaker
 from src.risk.manager import RiskConfig, RiskManager
@@ -181,7 +180,7 @@ class PaperTrader:
         Downloads warmup data, subscribes to ticks, and runs the trading loop
         until max_trades or max_session_hours is reached.
         """
-        started_at = datetime.now(timezone.utc)
+        started_at = datetime.now(UTC)
         logger.info("Paper trading session started at %s", started_at)
 
         # Step 1: Get balance (use one-shot, not subscribe)
@@ -210,7 +209,7 @@ class PaperTrader:
 
         while self._running:
             # Check stop conditions
-            elapsed_hours = (datetime.now(timezone.utc) - started_at).total_seconds() / 3600
+            elapsed_hours = (datetime.now(UTC) - started_at).total_seconds() / 3600
             if len(self.trades) >= self.max_trades:
                 logger.info("Max trades reached (%d). Stopping.", self.max_trades)
                 break
@@ -259,7 +258,7 @@ class PaperTrader:
         if self.open_trade:
             await self._close_trade(self.open_trade, "MANUAL", 0.0)
 
-        ended_at = datetime.now(timezone.utc)
+        ended_at = datetime.now(UTC)
         report = self._build_report(started_at, ended_at)
         self._save_report(report)
         return report
@@ -302,7 +301,7 @@ class PaperTrader:
                 "high": float(c["high"]),
                 "low": float(c["low"]),
                 "close": float(c["close"]),
-                "datetime": datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat(),
+                "datetime": datetime.fromtimestamp(epoch, tz=UTC).isoformat(),
             }
         except Exception as e:
             logger.error("Error getting latest candle: %s", e)
@@ -388,7 +387,7 @@ class PaperTrader:
 
             # Create trade record
             trade = PaperTrade(
-                entry_time=datetime.now(timezone.utc),
+                entry_time=datetime.now(UTC),
                 exit_time=None,
                 direction=signal.type.value,
                 symbol=self.symbol,
@@ -449,7 +448,7 @@ class PaperTrader:
         pnl: float = 0.0,
     ) -> None:
         """Close a trade and record it."""
-        trade.exit_time = datetime.now(timezone.utc)
+        trade.exit_time = datetime.now(UTC)
         trade.exit_price = exit_price
         trade.exit_reason = reason
         trade.pnl_usd = pnl
@@ -477,7 +476,7 @@ class PaperTrader:
             self.max_daily_loss = daily_loss
 
         # Reset daily if needed
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         if self.risk_manager.today and self.risk_manager.today.date != today:
             self.risk_manager.reset_daily(self.current_balance)
             self.starting_day_balance = self.current_balance

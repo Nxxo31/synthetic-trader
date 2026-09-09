@@ -16,13 +16,13 @@ import asyncio
 import json
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import requests
-import yaml
 import websockets
+import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ class DerivConfig:
     otp_path: str              # /trading/v1/options/accounts
 
     @classmethod
-    def from_yaml(cls, path: str = "config/deriv.yaml") -> "DerivConfig":
+    def from_yaml(cls, path: str = "config/deriv.yaml") -> DerivConfig:
         # Load project .env (overrides any global .env from Hermes shell)
         try:
             from dotenv import load_dotenv
@@ -317,7 +317,7 @@ class DerivClient:
         # Wait with timeout
         try:
             return await asyncio.wait_for(future, timeout=30.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._pending.pop(req_id, None)
             raise DerivAPIError(f"Request timed out (req_id={req_id})")
 

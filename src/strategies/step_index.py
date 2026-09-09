@@ -43,8 +43,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from src.strategies.base import Signal, SignalType, Strategy
 from src.analysis.indicators import calculate_atr, calculate_ema
+from src.strategies.base import Signal, SignalType, Strategy
 
 logger = logging.getLogger(__name__)
 

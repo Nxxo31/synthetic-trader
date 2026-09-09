@@ -7,12 +7,13 @@ extension point: adding a new strategy only requires registering it in
 the ``STRATEGY_REGISTRY`` dict (or calling :func:`register_strategy``).
 
 Registered strategies:
-    - ``"breakout"`` / ``"range_break"`` → :class:`RangeBreakStrategy`
-    - ``"volatility"``                 → :class:`VolatilityStrategy`
-    - ``"volatility_v2"``              → :class:`VolatilityStrategyV2`
-    - ``"confluence"``                 → :class:`ConfluenceStrategy`
-    - ``"step_index"``                 → :class:`StepIndexStrategy`
-    - ``"drift_boom_crash"``           → :class:`DriftBoomCrashStrategy`
+    - ``\"breakout\"`` / ``\"range_break\"`` → :class:`RangeBreakStrategy`
+    - ``\"volatility\"``                 → :class:`VolatilityStrategy`
+    - ``\"volatility_v2\"``              → :class:`VolatilityStrategyV2`
+    - ``\"confluence\"``                 → :class:`ConfluenceStrategy`
+    - ``\"step_index\"``                 → :class:`StepIndexStrategy`
+    - ``\"drift_boom_crash\"``           → :class:`DriftBoomCrashStrategy`
+    - ``\"aggressive_breakout\"``        → :class:`AggressiveBreakoutStrategy`
 
 Usage::
 
@@ -24,17 +25,17 @@ Usage::
 from __future__ import annotations
 
 import logging
-from typing import Callable
+from collections.abc import Callable
 
+from src.strategies.aggressive_breakout import AggressiveBreakoutConfig, AggressiveBreakoutStrategy
 from src.strategies.base import Signal, SignalType, Strategy
-from src.strategies.range_break import RangeBreakConfig, RangeBreakStrategy
-from src.strategies.volatility import VolatilityConfig, VolatilityStrategy
-from src.strategies.volatility_v2 import VolatilityV2Config, VolatilityStrategyV2
-from src.strategies.step_index import StepIndexConfig, StepIndexStrategy
 from src.strategies.drift_boom_crash import DriftBoomCrashConfig, DriftBoomCrashStrategy
+from src.strategies.range_break import RangeBreakConfig, RangeBreakStrategy
+from src.strategies.step_index import StepIndexConfig, StepIndexStrategy
+from src.strategies.volatility import VolatilityConfig, VolatilityStrategy
+from src.strategies.volatility_v2 import VolatilityStrategyV2, VolatilityV2Config
 
 logger = logging.getLogger(__name__)
-
 
 # --------------------------------------------------------------------------- #
 #  Confluence strategy — combines Breakout + Volatility for confluence entry
@@ -70,8 +71,11 @@ class ConfluenceStrategy(Strategy):
             return Signal(
                 type=SignalType.NO_SIGNAL,
                 symbol=self.symbol,
-                entry_price=0, stop_loss=0, take_profit=0,
-                duration_seconds=0, confidence=0.0,
+                entry_price=0,
+                stop_loss=0,
+                take_profit=0,
+                duration_seconds=0,
+                confidence=0.0,
             )
 
         sig_b = self.breakout.generate_signal(data)
@@ -82,7 +86,8 @@ class ConfluenceStrategy(Strategy):
                 type=SignalType.NO_SIGNAL,
                 symbol=self.symbol,
                 entry_price=sig_b.entry_price or sig_v.entry_price,
-                stop_loss=0, take_profit=0,
+                stop_loss=0,
+                take_profit=0,
                 duration_seconds=0,
                 confidence=0.0,
                 metadata={
@@ -97,7 +102,8 @@ class ConfluenceStrategy(Strategy):
                 type=SignalType.NO_SIGNAL,
                 symbol=self.symbol,
                 entry_price=sig_b.entry_price,
-                stop_loss=0, take_profit=0,
+                stop_loss=0,
+                take_profit=0,
                 duration_seconds=0,
                 confidence=0.0,
                 metadata={
@@ -115,7 +121,10 @@ class ConfluenceStrategy(Strategy):
 
         logger.info(
             "Confluence %s: breakout_conf=%.3f × vol_conf=%.3f = %.3f",
-            sig_b.type.value, sig_b.confidence, sig_v.confidence, combined_conf,
+            sig_b.type.value,
+            sig_b.confidence,
+            sig_v.confidence,
+            combined_conf,
         )
 
         return Signal(
@@ -160,6 +169,7 @@ STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
     "confluence": ConfluenceStrategy,
     "step_index": StepIndexStrategy,
     "drift_boom_crash": DriftBoomCrashStrategy,
+    "aggressive_breakout": AggressiveBreakoutStrategy,
 }
 
 # Default config class per strategy type
@@ -171,6 +181,7 @@ _CONFIG_REGISTRY: dict[str, type] = {
     "confluence": type(None),  # Confluence uses sub-strategy defaults
     "step_index": StepIndexConfig,
     "drift_boom_crash": DriftBoomCrashConfig,
+    "aggressive_breakout": AggressiveBreakoutConfig,
 }
 
 

@@ -89,6 +89,31 @@ Full pipeline research→default→dev validated across 10+ cron executions with
 
 **Executive Summary:** The profile-execution-protocol pipeline is fully operational and validated. All quality gates pass, architectural decisions documented with confidence levels, cross-profile context transmission verified, and the synthetic-trader project stands ready for continued dev phase development with all MCP coordination rules validated.
 
+
+### Estrategia Adicional: VolatilityV3 (B-2)
+
+**Añadido:** 2026-08-25
+
+**Descripción:** Estrategia de volatilidad integrada con Step Index — combina detección de régimen de volatilidad (CALM/NORMAL/STRESS/PANIC) con SL/TP en múltiplos del tamaño de paso StepIndex, escalado por régimen.
+
+**Características principales:**
+1. Detección de régimen de volatilidad con state machine y persistence days
+2. Mean-reversion en régimen CALM (bandas ATR + confirmación RSI)
+3. Trend-following en NORMAL/STRESS (EMA cross + MACD)
+4. PANIC → sit-out (NO_SIGNAL, señales incontrolables)
+5. Step size dinámico: se escala con vol_ratio, manteniendo precisión matemática del Step Index
+6. RR variables por régimen: 1:1 (CALM), 1:1.5 (NORMAL), 1:2 (STRESS)
+
+**Tests añadidos:** `tests/test_strategies_v3.py` — 4 tests:
+- `test_volatility_v3_basic`: generación básica de señal
+- `test_volatility_v3_insufficient_data`: manejo de datos insuficientes
+- `test_volatility_v3_panic_regime`: régimen PANIC sin señales
+- `test_volatility_v3_step_size_integration`: integración paso-size en SL/TP
+
+**Win probabilities por régimen (base):**
+- CALM: 0.58, NORMAL: 0.55, STRESS: 0.52, PANIC: 0.00
+
+**Integración con pipeline:** Estrategia compatible con Position Sizing Kelly dinámico del RiskManager, al igual que step_index.
 ### Bugs encontrados y corregidos
 1. `_trading_loop` nunca existió en git — implementado desde paper_trader.py
 2. Step size de stpRNG en STEP_SIZE_PCT usaba 0.001 (demasiado grande, 750x) — recalibrado a 0.000003

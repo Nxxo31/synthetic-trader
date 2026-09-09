@@ -10,10 +10,9 @@ Formato:
 from __future__ import annotations
 
 import logging
-from typing import Any
 
-from src.strategies.base import Signal, SignalType
 from src.risk.circuit_breaker import CircuitBreaker
+from src.strategies.base import Signal, SignalType
 
 logger = logging.getLogger(__name__)
 

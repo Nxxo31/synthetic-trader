@@ -1,0 +1,92 @@
+{
+  "phase": "default",
+  "architecture": {
+    "controller": {
+      "pattern": "BaseController with concrete implementations per strategy",
+      "key_components": [
+        "BaseController abstract class managing signal generation lifecycle",
+        "ControllerConfig holding symbol, strategy_name, score_threshold, cooldown, max_concurrent_signals",
+        "StepIndexController - trend following + mean reversion for Step Index instruments",
+        "VolatilityController - mean reversion with regime detection",
+        "RangeBreakController - channel breakout detection",
+        "DriftBoomCrashController - drift detection on boom/crash indices",
+        "ConfluenceController - dual confirmation (breakout + volatility)",
+        "Factory function create_controller() mapping strategy names to controller classes"
+      ],
+      "signal_flow": "Controller receives market data → generates Signal → publishes Event(SIGNAL_GENERATED) to message bus → Executor subscribes and acts"
+    },
+    "executor": {
+      "pattern": "BaseExecutor with concrete DerivExecutor and PaperExecutor",
+      "key_components": [
+        "ExecutorConfig holding symbol, strategy_name, max_position_duration, default_stake",
+        "BaseExecutor abstract class with execute_order(), subscribe(), on_signal_validated()",
+        "DerivExecutor - real Deriv API via WebSocket: get_proposal() → buy() → contract management",
+        "PaperExecutor - simulation: instant fill, _monitor_paper_position() for TP/SL/time exit",
+        "RiskEngine validation passed before any order submission",
+        "Factory function create_executor() mapping executor types to classes"
+      ],
+      "order_flow": "Signal received → RiskEngine.validate_order() → if passed: DerivExecutor.buy() or PaperExecutor simulated fill → Position added to Portfolio → P&L recorded in RiskEngine"
+    },
+    "paper_trading": {
+      "pattern": "PaperExecutor simulates Deriv trading for paper trading phase",
+      "key_components": [
+        "Instant fill simulation - paper trades fill immediately on signal",
+        "_monitor_paper_position() - tracks TP/SL/expiry with time-based exit",
+        "Records P&L in RiskEngine.record_fill() for daily stats tracking",
+        "Publishes POSITION_OPENED and POSITION_CLOSED events on message bus",
+        "Uses same RiskEngine validation as live trading (2% per trade, 5% daily DD, circuit breaker)",
+        "default_stake configurable, Position objects track entry/exit, P&L, contract_id",
+        "Integration points: subscribes to SIGNAL_GENERATED events, outputs contract_id and mode='paper'"
+      ],
+      "paper_trading_gate": "Phase 3 requires 30+ paper trades, profitable, no day >-5% before live trading approval"
+    },
+    "strategy_registry": {
+      "pattern": "Plug-in interface via abstract Strategy base class",
+      "key_components": [
+        "Strategy ABC with abstract methods: generate_signal(data: pd.DataFrame) -> Signal, get_win_probability(signal: Signal) -> float",
+        "Signal dataclass: type(SignalType), symbol, entry_price, stop_loss, take_profit, duration_seconds, confidence(0-1), metadata",
+        "Concrete strategies: StepIndexStrategy (EMA trend + ATR reversion), VolatilityStrategyV2, RangeBreakStrategy, DriftBoomCrashStrategy, ConfluenceStrategy, AggressiveBreakoutStrategy",
+        "STEP_SIZE_PCT dict: step size per symbol (STEPT10=0.001, STEPT100=0.010, stpRNG=0.000003)",
+        "StepIndexConfig: ema_fast_period(9), ema_slow_period(21), ema_midline_period(20), atr_period(14), min_candles(30), step_size_pct, reversion_steps(1.5), reversion_max_steps(4.0), trend_weight(0.6), reversion_weight(0.4), sl_steps(2.0), tp_steps(3.0), max_duration(600), score_threshold(0.15)",
+        "Factory pattern: create_controller() and create_executor() for runtime instantiation",
+        "Strategy registration by name in controller/executor factory dicts"
+      ],
+      "strategy_interface_contract": "All strategies must implement: generate_signal(data) → Signal and get_win_probability(signal) → float in [0.55, 0.70] range for Kelly sizing"
+    }
+  },
+  "decisions": [
+    {
+      "decision": "Controller-Executor pattern over monolithic design",
+      "rationale": "Separation of concerns: Controllers decide WHAT to trade (signal generation), Executors handle HOW to trade (order routing/fill). Enables independent testing, per-strategy controller logic, per-executor API integration. Matches Hummingbot V2 + NautilusTrader pattern already referenced in codebase.",
+      "tradeoffs": "Added latency from message bus indirection, but enables parallel controller/executor development and substitution (e.g., DerivExecutor ↔ PaperExecutor) without affecting strategy logic"
+    },
+    {
+      "decision": "RiskEngine as central validation gate for all orders",
+      "rationale": "Single source of truth for PROJECT.md risk rules: 2% max risk per trade, 5% daily drawdown, 10 trades max per day, circuit breaker after consecutive losses. All orders (Deriv or paper) must pass validation. Prevents config drift between live and paper modes. Enables quarter-Kelly position sizing with volatility adjustments.",
+      "tradeoffs": "One extra validation step before execution, but eliminates risk rule bugs and enables consistent risk tracking across all execution modes"
+    },
+    {
+      "decision": "TypedMessageBus over direct method calls",
+      "rationale": "Type-safe event backbone with Pub/Sub + Req/Rep enables decoupled controller→executor communication, supports multiple executor types (paper/deriv) subscribing to same signals, and provides correlation_id tracking for trade attribution. The typed implementation (message_bus_typed.py) provides compile-time safety.",
+      "tradeoffs": "Slightly more complex setup vs direct calls, but enables the paper/deriv executor swap pattern and diagnostic event tracing"
+    },
+    {
+      "decision": "PaperExecutor simulates instant fills with time-based monitoring",
+      "rationale": "Paper trading phase needs rapid validation of strategies without Deriv API rate limits. Instant fill allows accumulating 30+ trades quickly. _monitor_paper_position() simulates TP/SL/expiry with placeholders for later live price feed integration. Shares same RiskEngine for consistent risk tracking.",
+      "tradeoffs": "Instant fill doesn't model slippage or order book dynamics; Phase 3 gate requires 30+ trades before live transition, acknowledging this limitation"
+    },
+    {
+      "decision": "Strategy plug-in interface via abstract base class",
+      "rationale": "Enables new strategies (mean reversion, momentum, stat-arb) to be added without modifying controller/executor core. Each strategy implements generate_signal + get_win_probability. The StepIndexStrategy already demonstrates the hybrid trend+reversion pattern with known step size for deterministic risk. Factory functions auto-register by name.",
+      "tradeoffs": "Need to ensure all strategies adhere to the Signal interface; missing methods break the pipeline. Mitigated by factory validation and LSP live_diagnostics gate"
+    },
+    {
+      "decision": "score_threshold 0.15 for StepIndex vs 0.35 default for other controllers",
+      "rationale": "Step Index has 'less structural noise' per step_index.py:135, so lower threshold (0.15) allows more signals. Other strategies use 0.35 default. This difference is config-driven, not code-enforced, allowing per-strategy tuning.",
+      "tradeoffs": "Lower threshold means more NO_SIGNAL rejections from score_below_threshold, but increases trade frequency for Step Index where edge is quantified via win probability ~62%"
+    }
+  ],
+  "research_context_used": true,
+  "timing_ms": 125,
+  "status": "success"
+}

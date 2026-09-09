@@ -1,19 +1,9 @@
-"""Synthetic Trader — Main entry point for trading.
-
-Usage (from project root):
-    .venv/bin/python -m src.trading.engine [--symbol SYMBOL] [--strategy STRATEGY]
-
-This is the SINGLE entry point for all trading modes.
-The old `src.main` with paper/api/backtest modes is deprecated;
-use `src.trading.engine` which encompasses all functionality.
-"""
-
 from __future__ import annotations
 
-import asyncio
-import sys
 import argparse
+import asyncio
 import logging
+import sys
 from pathlib import Path
 
 # Ensure src is on the path
@@ -21,8 +11,8 @@ _PROJECT_ROOT = Path(__file__).parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from src.trading.engine import TradingEngine, EngineConfig
 from src.trading.config import get_config
+from src.trading.engine import EngineConfig, TradingEngine
 
 logger = logging.getLogger("synthetic-trader")
 
@@ -86,15 +76,26 @@ def main():
     # Create and initialize the trading engine
     engine = TradingEngine(config=engine_config)
 
+    # Run the trading engine
+    asyncio.run(run_engine(engine, args.watch))
+
+
+async def run_engine(engine: TradingEngine, watch: bool):
+    """Run the trading engine with proper async lifecycle."""
+    # Initialize the engine (starts message bus, loads warmup data)
+    await engine.initialize()
+
     # Start trading
-    asyncio.create_task(engine.start_trading(), name="trading_loop")
+    await engine.start_trading()
 
     # Keep running - engine handles its own lifecycle
     try:
-        asyncio.get_event_loop().run_forever()
+        # Keep the event loop alive
+        while True:
+            await asyncio.sleep(1)
     except KeyboardInterrupt:
         logger.info("KeyboardInterrupt received, shutting down...")
-        asyncio.create_task(engine.stop(), name="shutdown")
+        await engine.stop()
 
 
 if __name__ == "__main__":
