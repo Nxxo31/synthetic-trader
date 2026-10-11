@@ -895,3 +895,21 @@ en este PROJECT.md o en dark-memory como agent_memory kind=episodic.
 
 *Hygiene documental aplicada por SophIA el 2026-10-11 (memo #186).
 Decisión: MANTENER MiniMax-M3 como primary LLM (memo #187).*
+
+
+## Refactor Fase 0 (2026-10-11)
+
+  **Decisión arquitectónica:** eliminar `src/strategy/` (singular, abandoned).
+
+  Hallazgo verificado: cero imports de `from src.strategy` (singular) en
+  todo el codebase. En cambio, `from src.strategies` (plural) tiene 25+
+  imports y es la fuente canónica de las 8 estrategias activas.
+
+  El directorio `src/strategy/` contenía un patrón factory nuevo incompleto
+  (solo `base.py` + `range_break.py`) que nunca se integró con
+  `src.trading.engine`. Se mueve a `_archive/2026-10-11/src-strategy-
+  singular-DELETED/` para preservar histórico. Si en el futuro se retoma
+  el patrón factory, partir de `src/strategies/strategy_factory.py`
+  (que SÍ está vivo).
+
+  Refs: memo #188 (P1.5), memo #190 (workers progress).
