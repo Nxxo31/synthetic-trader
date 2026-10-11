@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,16 @@ class RiskConfig:
     max_trades_per_day: int = 10        # Max trades per day
     use_kelly: bool = True              # Kelly dimensionamiento activo
     confidence_threshold: float = 0.6   # Min confidence to enter trade
+
+    # Legacy field names (pre Sept-2026 rewrite) used by `RiskManager`,
+    # `backtest/engine.py` and the risk test-suite. Kept in sync by default
+    # with the fields above; explicit values override. Both sets coexist so
+    # old and new call sites share one config object.
+    max_risk_per_trade: float = 0.015
+    max_daily_drawdown: float = 0.05
+    circuit_breaker_losses: int = 5
+    kelly_fraction: float = 0.25
+    initial_capital: float = 10000.0
 
     def validate(self) -> list[str]:
         """Valida la configuración y retorna una lista de errores (vacía si OK)."""
@@ -244,10 +255,265 @@ def check_circuit_breaker(
     return result
 
 
+# ─── Class-based RiskManager (restored) ─────────────────────────────────────
+#
+# Historically ``src/risk/manager.py`` exposed a class-based ``RiskManager``
+# used in production by ``src/trading/paper_runner.py`` (the 24/7 paper bot),
+# ``src/trading/paper_trader.py``, and ``src/backtest/engine.py``.  A Sept-08
+# rewrite of this module dropped the class while those call sites were never
+# migrated, leaving the paper-bot entry points un-importable.  The class is
+# restored here with a config bridge: it works with both the legacy dataclass
+# fields (``max_risk_per_trade``, ``max_daily_drawdown``, …) and the current
+# ``RiskConfig`` field names (``max_position_pct``, ``max_daily_loss_pct``).
+#
+# NOTE: the module-level ``position_size_dynamic`` / ``check_circuit_breaker``
+# functions above are kept untouched — new code should prefer the class API
+# below ``or`` the module functions, but not mix them on the same state.
+
+
+@dataclass
+class DailyStats:
+    """Tracks trading stats for the current day."""
+
+    date: str
+    trades: int = 0
+    wins: int = 0
+    losses: int = 0
+    pnl: float = 0.0
+    starting_balance: float = 0.0
+    current_balance: float = 0.0
+    consecutive_losses: int = 0
+    halted: bool = False
+    halt_reason: str = ""
+
+
+class RiskManager:
+    """Enforces risk rules on every trade (class API).
+
+    Rules (non-negotiable):
+    1. Max risk per trade (``max_risk_per_trade`` / ``max_position_pct``)
+    2. Max daily drawdown (``max_daily_drawdown`` / ``max_daily_loss_pct``)
+    3. Max trades per day
+    4. Halt after ``circuit_breaker_losses`` consecutive losses (default 5)
+    5. Quarter-Kelly position sizing (``kelly_fraction``, default 0.25)
+
+    The constructor resolves each limit from whatever config object it is
+    given, preferring the historical field names and falling back to the
+    current ``RiskConfig`` ones (and vice versa for ``max_trades_per_day``).
+    """
+
+    def __init__(self, config: "RiskConfig | Any"):
+        self.config = config
+        # Resolve config values with fallbacks across both config schemas.
+        self.max_risk_per_trade = float(
+            getattr(config, "max_risk_per_trade",
+                    getattr(config, "max_position_pct", 0.015))
+        )
+        self.max_daily_drawdown = float(
+            getattr(config, "max_daily_drawdown",
+                    getattr(config, "max_daily_loss_pct", 0.05))
+        )
+        self.max_trades_per_day = int(getattr(config, "max_trades_per_day", 8))
+        self.circuit_breaker_losses = int(
+            getattr(config, "circuit_breaker_losses", 5)
+        )
+        self.kelly_fraction = float(getattr(config, "kelly_fraction", 0.25))
+        self.today: DailyStats | None = None
+        self._is_halted = False
+        self._halt_reason = ""
+
+    def reset_daily(self, balance: float) -> None:
+        """Reset daily stats. Call at start of each trading day."""
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        self.today = DailyStats(
+            date=today_str,
+            starting_balance=balance,
+            current_balance=balance,
+        )
+        self._is_halted = False
+        self._halt_reason = ""
+        logger.info("Daily risk reset. Balance: %.2f USD", balance)
+
+    def can_trade(self) -> tuple[bool, str]:
+        """Check if trading is allowed under current risk rules."""
+        if self._is_halted:
+            return False, f"HALTED: {self._halt_reason}"
+
+        if self.today is None:
+            return False, "Daily stats not initialized. Call reset_daily() first."
+
+        if self.today.trades >= self.max_trades_per_day:
+            return False, f"Max trades per day reached ({self.max_trades_per_day})"
+
+        if self.today.starting_balance > 0:
+            drawdown = (
+                self.today.starting_balance - self.today.current_balance
+            ) / self.today.starting_balance
+            if drawdown >= self.max_daily_drawdown:
+                self._halt(f"Daily drawdown limit reached: {drawdown:.2%}")
+                return False, self._halt_reason
+
+        if self.today.consecutive_losses >= self.circuit_breaker_losses:
+            self._halt(
+                f"Circuit breaker: {self.today.consecutive_losses} consecutive losses"
+            )
+            return False, self._halt_reason
+
+        return True, "OK"
+
+    def position_size(
+        self,
+        capital: float,
+        win_probability: float,
+        win_amount: float,
+        loss_amount: float,
+    ) -> float:
+        """Quarter-Kelly position size, capped at max_risk_per_trade * capital."""
+        p = win_probability
+        q = 1.0 - p
+        b = win_amount / loss_amount if loss_amount > 0 else 0
+
+        kelly = (p * b - q) / b if b > 0 else 0
+        quarter_kelly = kelly * self.kelly_fraction
+
+        max_risk = self.max_risk_per_trade * capital
+        size = min(quarter_kelly * capital, max_risk)
+
+        if size <= 0:
+            logger.warning("Kelly <= 0 (p=%.3f, b=%.3f). No edge detected.", p, b)
+            return 0.0
+
+        logger.info(
+            "Position size: %.2f USD (Kelly=%.4f, QK=%.4f, cap=%.2f)",
+            size, kelly, quarter_kelly, max_risk,
+        )
+        return round(size, 2)
+
+    def position_size_dynamic(
+        self,
+        capital: float,
+        win_probability: float,
+        win_amount: float,
+        loss_amount: float,
+        confidence: float = 1.0,
+        volatility_multiplier: float = 1.0,
+    ) -> float:
+        """Kelly dinámico — ajusta por confidence (score) y volatilidad.
+
+        ``confidence`` mezcla el win_probability hacia 0.5 (edge neutral) y
+        ``volatility_multiplier`` (>= 1) reduce el tamaño en mercados volátiles.
+        Returns 0.0 cuando no hay edge (Kelly <= 0).
+        """
+        confidence = max(0.0, min(1.0, confidence))
+        if confidence < 1.0:
+            p = 0.5 + (win_probability - 0.5) * confidence
+        else:
+            p = win_probability
+        p = min(0.99, max(0.01, p))
+        q = 1.0 - p
+
+        b = win_amount / loss_amount if loss_amount > 0 else 0.0
+        if b <= 0:
+            logger.warning(
+                "Kelly dinámico: b<=0 (win_amount=%.4f, loss_amount=%.4f)",
+                win_amount, loss_amount,
+            )
+            return 0.0
+
+        kelly = (p * b - q) / b
+        if kelly <= 0:
+            logger.warning(
+                "Kelly dinámico <= 0 (p=%.3f, b=%.3f, conf=%.3f). No edge.",
+                p, b, confidence,
+            )
+            return 0.0
+
+        vm = max(1.0, volatility_multiplier)
+        adjusted_fraction = kelly * self.kelly_fraction / vm
+
+        max_risk = self.max_risk_per_trade * capital
+        size = min(adjusted_fraction * capital, max_risk)
+
+        if size <= 0:
+            return 0.0
+
+        logger.info(
+            "Position size (dynamic): %.2f USD (Kelly=%.4f, adj_frac=%.4f, "
+            "conf=%.3f, vol_mult=%.3f, cap=%.2f)",
+            size, kelly, adjusted_fraction, confidence, vm, max_risk,
+        )
+        return round(size, 2)
+
+    def record_trade(self, pnl: float, new_balance: float) -> None:
+        """Record a completed trade (updates daily stats + circuit state)."""
+        if self.today is None:
+            logger.error("record_trade called before reset_daily")
+            return
+
+        self.today.trades += 1
+        self.today.pnl += pnl
+        self.today.current_balance = new_balance
+
+        if pnl >= 0:
+            self.today.wins += 1
+            self.today.consecutive_losses = 0
+        else:
+            self.today.losses += 1
+            self.today.consecutive_losses += 1
+
+        logger.info(
+            "Trade recorded: P&L=%.2f, Total=%d trades, W/L=%d/%d, Balance=%.2f",
+            pnl, self.today.trades, self.today.wins, self.today.losses, new_balance,
+        )
+
+        can, reason = self.can_trade()
+        if not can and "HALTED" in reason:
+            logger.warning("Circuit breaker triggered: %s", reason)
+
+    def daily_report(self) -> dict[str, Any]:
+        """Generate daily risk report."""
+        if self.today is None:
+            return {"error": "No daily stats"}
+
+        drawdown = (
+            (self.today.starting_balance - self.today.current_balance)
+            / self.today.starting_balance
+            if self.today.starting_balance > 0
+            else 0.0
+        )
+        win_rate = self.today.wins / self.today.trades if self.today.trades > 0 else 0.0
+
+        return {
+            "date": self.today.date,
+            "trades": self.today.trades,
+            "wins": self.today.wins,
+            "losses": self.today.losses,
+            "win_rate": round(win_rate, 4),
+            "pnl": round(self.today.pnl, 2),
+            "drawdown": round(drawdown, 4),
+            "consecutive_losses": self.today.consecutive_losses,
+            "halted": self._is_halted,
+            "halt_reason": self._halt_reason,
+            "starting_balance": self.today.starting_balance,
+            "current_balance": self.today.current_balance,
+        }
+
+    def _halt(self, reason: str) -> None:
+        """Halt trading."""
+        self._is_halted = True
+        self._halt_reason = reason
+        if self.today:
+            self.today.halted = True
+            self.today.halt_reason = reason
+        logger.critical("TRADING HALTED: %s", reason)
+
+
 # Export principal para compatibilidad con scripts antiguos
 __all__ = [
     "RiskConfig",
     "PositionSizeResult",
     "position_size_dynamic",
     "check_circuit_breaker",
+    "DailyStats",
+    "RiskManager",
 ]

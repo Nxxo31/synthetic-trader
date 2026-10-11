@@ -913,3 +913,65 @@ Decisión: MANTENER MiniMax-M3 como primary LLM (memo #187).*
   (que SÍ está vivo).
 
   Refs: memo #188 (P1.5), memo #190 (workers progress).
+
+
+## Refactor Fase 1 (2026-10-11) — paper_runner: opción A (conservar)
+
+**Decisión arquitectónica:** Opción A — conservar `src/trading/paper_runner.py`
+(legacy) importando `src/strategies/*` vía `strategy_factory`. NO migrar aún al
+engine Controller-Executor (opción B queda como Fase 2, quando se afiance el
+engine con backtests + gates). Rationale: "don't break what works" — el bot de
+paper trading es el componente de mayor valor del pipeline y el engine nuevo
+no ha ejecutado un solo trade en vivo.
+
+**Hallazgos críticos durante la ejecución (regresiones ya presentes en HEAD):**
+
+1. `paper_runner.py` estaba **truncado desde commit `5f4ceb6` (2026-08-03)**:
+   `run()` llamaba `self._trading_loop(client)` pero el método (y todo el loop
+   de trading: `_execute_signal`, `_simulate_paper_trade`, `_save_report`,
+   `_generate_daily_report`, `_reconnect_or_halt`…) había sido borrado
+   accidentalmente al "commit previous worker changes". El bot no podía
+   arrancar — `AttributeError` inmediato tras el warmup.
+2. `src/risk/manager.py` perdió la clase `RiskManager` en commit `e3214dc`
+   (2026-09-08, rewrite del módulo), mientras `paper_runner`, `paper_trader`,
+   `backtest/engine.py` y los tests de riesgo seguían importándola — import
+   roto para cualquier ruta legacy.
+
+**Trabajo realizado (opción A):**
+
+- Restaurado el bloque borrado de `paper_runner.py` desde `572e6bf`,
+  conservando las mejoras posteriores (`SCORE_THRESHOLD=0.35` documentado,
+  wrapper `run_paper_trading` de `910da71`, `_write_realtime_state` defensivo
+  de `7a2eac1`). → 446 → 874 líneas.
+- Restaurada la clase `RiskManager` (+ `DailyStats`) en `src/risk/manager.py`
+  con puente de config (acepta tanto los campos legacy
+  `max_risk_per_trade`/`max_daily_drawdown` como los nuevos
+  `max_position_pct`/`max_daily_loss_pct`). `RiskConfig` reincorpora los
+  campos legacy. Las funciones module-level nuevas quedan intactas.
+- Nuevo test de integración `tests/test_integration_paper_runner.py`:
+  (a) ciclo completo paper_runner (candles → signal → RiskManager sizing →
+  paper TP → trade registrado → reporte), (b) daily report importado a
+  `strategies.db` vía `daily_attribution.process_all`.
+
+**Verificación (Windows, `.venv` recreada con `uv pip install -e .[dev]`,
+Python 3.14):**
+
+- `pytest tests/ src/risk/ --ignore=tests/test_api_server.py` → **61 passed**
+  (9 strategies + 50 risk + 2 nuevos de integración).
+- `tests/test_api_server.py` falla en colección (falta `httpx` — pre-existente,
+  no toca Fase 1).
+- `src/trading/test_paper_runner.py` sigue roto en colección: importa
+  `paper_trader.py`, que depende de `RecommendationEngine` (clase legacy ya
+  inexistente en `src/analysis/recommender.py`). Módulo legacy marcado para
+  eliminación en el master plan (T-001) — follow-up creado,
+  bloqueado por decisión del operador (borrado de código).
+
+**Estado del paper trading 24/7:** NO verificado en este host. El deploy
+systemd vive en Linux (`/home/sebas/...`); los daily reports dejaron de
+generarse el **2026-08-12** (9 días después del commit que quebró el runner).
+No puede confirmarse desde aquí si el servidor remoto sigue corriendo; el
+código de HEAD no lo haría. Requiere acceso SSH o `systemctl status` en el
+host Linux para cerrar el punto 1 del checklist de Fase 1.
+
+  Refs: memo #188, memo #190, commit 5f4ceb6 (regresión), commit e3214dc
+  (rewrite risk manager).
