@@ -850,3 +850,38 @@ drift_boom_crash # DriftBoomCrashStrategy — kraken (post-spike drift)
 - `/home/sebas/proyectos/synthetic-trader/dev_output.json` - Dev phase 8-cycle results
 
 **Next:** Orchestrator phase for deployment decision and post-deploy monitoring.
+
+
+---
+
+## Histórico Pipeline SDD (archivado 2026-10-11)
+
+Los siguientes 6 archivos eran artefactos del pipeline Spec-Driven Dev
+(fase research → default → dev) generado en agosto 2026. Su contenido
+está consolidado en las secciones previas de este PROJECT.md. Se mueven
+a `_archive/2026-10-11/` para cumplir la regla "no archivos .md sueltos"
+(memo #172) preservando el histórico en disco.
+
+| Archivo                                  | Tamaño | Razón del archivo                                   |
+|------------------------------------------|--------|------------------------------------------------------|
+| `REFACTORING_MASTER_PLAN.md`             | 26 KB  | Plan de unificación legacy/new. Supersedido por §Stack Tecnológico + §Marco Conceptual de este PROJECT.md |
+| `architectural_synthesis.md`             | 19 KB  | Síntesis de 30 research findings con confidence. Conteo de CONFIRMED/PROBABLE preservado en §Limitaciones Conocidas |
+| `default_architectural_analysis.md`      | 13 KB  | 16 decisiones arquitectónicas D1-D16. Conteo y rationale consolidados en §Stack Tecnológico + §Marco Conceptual |
+| `pipeline_dispatch_report.md`            |  5 KB  | Reporte de test cron profile-dispatch. Histórico del 2026-08-21. Rate limits documentados, lessons aprendidas ya incorporadas |
+| `architecture_spec.json`                 |  7 KB  | Spec JSON del controller/executor/strategy_registry. Redundante con §Diagrama de Arquitectura |
+| `reforge-state.json`                     |  1 KB  | Health history + fix log. Snapshot del 2026-08-19. Valor histórico para diffs de health a lo largo del refactor |
+
+**Acceso al histórico:** todos viven en `_archive/2026-10-11/` y siguen
+accesibles vía git log + el path local. Si necesitas recuperarlos:
+
+```bash
+git -C ~/Desktop/proyectos/synthetic-trader log --all -- '_archive/2026-10-11/'
+```
+
+No reintroducirlos al root del repo — el contenido debe seguir viviendo
+en este PROJECT.md o en dark-memory como agent_memory kind=episodic.
+
+---
+
+*Hygiene documental aplicada por SophIA el 2026-10-11 (memo #186).
+Decisión: MANTENER MiniMax-M3 como primary LLM (memo #187).*
