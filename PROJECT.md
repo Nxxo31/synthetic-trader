@@ -1,6 +1,16 @@
 # PROJECT.md — Synthetic Trader SaaS
 
-> **Estado:** Activo — Paper Trading 24/7 en curso (stpRNG + step_index) | **Versión:** 0.4.0 | **Última actualización:** 2026-08-14
+> **Estado:** Activo — Paper Trading 24/7 en curso (stpRNG + step_index) | **Versión:** 0.4.0 | **Última actualización:** 2026-10-11
+
+---
+
+## 🧭 Fase 0 — Decisión de arquitectura de estrategias (2026-10-11)
+
+- **Decisión:** `src/strategies/` es el paquete canónico de estrategias. Lo usan `src/trading/strategy_factory.py`, `src/trading/paper_runner.py`, backtests y tests.
+- **`src/strategy/` eliminado:** era un compatibility shim mínimo (`base.py`, `range_break.py`) sin call-sites activos en repo; no era una factory nueva ni contenía lógica única.
+- **Entry point único:** `src/main.py` permanece como CLI delgado que delega en `src/trading/engine.py`; `scripts/paper_247.py` sigue invocando `python -m src.main --executor paper`.
+- **Restricción respetada:** `src/trading/engine.py` no fue modificado en esta limpieza.
+- **Validación estática:** no quedan imports `src.strategy` / `from src.strategy...` fuera del histórico archivado.
 
 ---
 
