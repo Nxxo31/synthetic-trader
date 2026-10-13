@@ -975,3 +975,64 @@ host Linux para cerrar el punto 1 del checklist de Fase 1.
 
   Refs: memo #188, memo #190, commit 5f4ceb6 (regresión), commit e3214dc
   (rewrite risk manager).
+
+## Fix suite CI (2026-10-13) — nightly-suite verde: 176 passed
+
+Kanban t_3c94c90b (nightly-suite) + t_75bc2fb1 (Fase 0 verificación). Aprobación
+operador en sesión opencode sess-000d8714a5457001: instalar deps faltantes y
+reparar la colección rota.
+
+**Diagnóstico — 4 hallazgos (el kanban solo reportaba 2 síntomas):**
+
+1. `tests/test_api_server.py` — `httpx` y `fastapi` faltaban en `.venv`: el venv
+   se instala desde `pyproject.toml` y no declaraba ninguno; `requirements.txt`
+   solo cubre deploy.
+2. `src/trading/test_paper_runner.py` — imports apuntando a `paper_trader.py`
+   (módulo legacy con `RecommendationEngine` ya inexistente) cuando el test fue
+   escrito para `paper_runner.py` (`PaperTradingEngine` + REALTIME/EQUITY/TRADES
+   files). Síntoma reportado: `ImportError: RecommendationEngine`.
+3. `src/api/server.py` — regresión del commit e3214dc (el mismo que borró
+   `RiskManager` y el loop de paper_runner): el server completo de 1130 líneas
+   (7a2eac1) fue reemplazado por un stub message-bus de 46 líneas con la línea
+   46 corrupta (resto del archivo viejo aplastado en una línea con `\n`
+   literales). Sin endpoints: los 26 tests de API no podían pasar ni con las
+   deps instaladas.
+4. `src/analysis/test_attribution.py` (Brinson-Fachler) — PermissionError
+   WinError 32 en cleanup: `with sqlite3.Connection` solo gestiona la
+   transacción, NO cierra; las conexiones sobrevivían hasta el GC de ciclos y
+   bloqueaban el unlink de `/tmp/test_bf_alloc.db` (solo manifiesta en Windows;
+   en Linux unlink con fd abierto funciona).
+
+**Fixes:**
+
+- `pyproject.toml`: `httpx>=0.27` (dev) + `fastapi>=0.104` (runtime); instalados
+  en `.venv` vía uv.
+- `src/trading/test_paper_runner.py`: imports corregidos a
+  `src.trading.paper_runner`; `# type: ignore` en el test double `_FakeCB`
+  (convención existente del repo).
+- `src/api/server.py`: restaurado íntegro desde 7a2eac1 (`git restore
+  --source=7a2eac1`), mismo criterio que la restauración de paper_runner en
+  a404947. Dependencias verificadas contra HEAD (solo `src.api._aliases`).
+- `src/analysis/attribution.py`: `_connect()` convertido en `@contextmanager`
+  con commit/rollback y `close()` determinístico — repara el leak de conexiones
+  en todas las plataformas (en Linux también quedaban abiertas hasta GC).
+
+**Verificación (Windows, .venv, Python 3.14, pytest 9.1.1):**
+
+- `pytest --tb=line -q` (suite completa: tests/ + src/) → **176 passed,
+  0 failed** (antes: 149 passed + 26 errors de colección + 1 failed).
+- `ruff check`: sin deuda nueva; restan solo findings pre-existentes (N806
+  `R_p`/`R_b` en attribution.py — notación estándar Brinson-Fachler — y deuda
+  del server histórico restaurado: UP017/UP015/E501/W293/W292/F401/I001).
+- `py_compile` OK en los 3 archivos Python tocados.
+
+**No tocado:** `src/trading/paper_trader.py` (legacy, marcado para eliminación
+T-001 — decisión operador) sigue con su import roto de `RecommendationEngine`;
+ya nada lo importa, queda aislado hasta su borrado.
+
+**Pendiente operador:** commit + push de los 4 archivos (diff: +1266/−28).
+Untracked pre-existentes NO incluidos: `scripts/apertura_scan.py`,
+`scripts/_probe_legacy_ws.py`, `reports/apertura/`.
+
+  Refs: kanban t_3c94c90b, t_75bc2fb1; commit e3214dc (regresión server);
+  commit 7a2eac1 (server bueno); commit a404947 (precedente de restauración).

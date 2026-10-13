@@ -82,6 +82,8 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -210,8 +212,14 @@ class StrategyAttribution:
     #  Internal — connection helpers                                     #
     # ------------------------------------------------------------------ #
 
-    def _connect(self) -> sqlite3.Connection:
-        """Open a SQLite connection with row factory for dict-like access."""
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Open a SQLite connection with row factory for dict-like access.
+
+        Commits on clean exit, rolls back on error and always closes the
+        connection — ``with sqlite3.Connection`` alone only manages the
+        transaction, leaking open handles that block file deletion on Windows.
+        """
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
@@ -219,7 +227,14 @@ class StrategyAttribution:
         # Ensure tables exist — safe for fresh/test DBs and no-op for
         # the initialised project DB (migration 001 already ran).
         self._ensure_schema(conn)
-        return conn
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
         """Create the two required tables if they don't exist yet.

@@ -20,8 +20,8 @@ from unittest import mock
 
 import pytest
 
-from src.trading import paper_trader as paper_runner
-from src.trading.paper_trader import PaperTradingEngine
+from src.trading import paper_runner
+from src.trading.paper_runner import PaperTradingEngine
 
 # ---------------------------------------------------------------------------
 #  Helpers — create a minimal engine without running __init__
@@ -51,7 +51,7 @@ def _make_minimal_engine(tmpdir: Path) -> PaperTradingEngine:
         def status(self):
             return {"consecutive_losses": 0, "is_halted": False}
 
-    engine.circuit_breaker = _FakeCB()
+    engine.circuit_breaker = _FakeCB()  # type: ignore
 
     return engine
 
